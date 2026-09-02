@@ -403,6 +403,7 @@ public sealed class DeviceClient : IAsyncDisposable
                     Name = new DirectoryInfo(fullPath).Name,
                     LocalPath = fullPath,
                     Extensions = f.Extensions,
+                    IgnoredExtensions = f.IgnoredExtensions,
                     ScrubLevel = f.ScrubLevel
                 };
             }).ToList();

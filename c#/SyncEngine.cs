@@ -116,7 +116,7 @@ public sealed class SyncEngine : IAsyncDisposable
 
             foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
             {
-                if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions)) continue;
+                if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
 
                 string rel = Path.GetRelativePath(folderPath, file).Replace('\\', '/').TrimStart('/');
                 string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
@@ -248,7 +248,7 @@ public sealed class SyncEngine : IAsyncDisposable
 
                 foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
                 {
-                    if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions)) continue;
+                    if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
 
                     string rel = Path.GetRelativePath(folderPath, file).Replace('\\', '/').TrimStart('/');
                     string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
@@ -379,6 +379,7 @@ public sealed class SyncEngine : IAsyncDisposable
             Name = new DirectoryInfo(f.Path).Name,
             LocalPath = Path.GetFullPath(f.Path),
             Extensions = f.Extensions,
+            IgnoredExtensions = f.IgnoredExtensions,
             ScrubLevel = f.ScrubLevel
         }).ToList();
 
@@ -393,7 +394,7 @@ public sealed class SyncEngine : IAsyncDisposable
             {
                 foreach (var file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
                 {
-                    if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions)) continue;
+                    if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
                     string rel = Path.GetRelativePath(full, file).Replace('\\', '/').TrimStart('/');
                     string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
                     manifest[targetRel] = new FileInfo(file).Length;

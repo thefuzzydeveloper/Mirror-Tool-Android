@@ -13,17 +13,11 @@ public sealed class FolderConfig
     [JsonPropertyName("extensions")]
     public List<string> Extensions { get; set; } = ["*"];
 
+    [JsonPropertyName("ignored_extensions")]
+    public List<string> IgnoredExtensions { get; set; } = [];
+
     [JsonPropertyName("scrub_level")]
     public int ScrubLevel { get; set; } = 0;
-}
-
-public sealed class AppConfig
-{
-    [JsonPropertyName("manual_ip")]
-    public string ManualIp { get; set; } = string.Empty;
-
-    [JsonPropertyName("windows_folders")]
-    public List<FolderConfig> WindowsFolders { get; set; } = [];
 }
 
 public sealed class FolderWirePayload
@@ -40,8 +34,19 @@ public sealed class FolderWirePayload
     [JsonPropertyName("extensions")]
     public List<string> Extensions { get; set; } = [];
 
+    [JsonPropertyName("ignored_extensions")]
+    public List<string> IgnoredExtensions { get; set; } = [];
+
     [JsonPropertyName("scrub_level")]
     public int ScrubLevel { get; set; }
+}
+public sealed class AppConfig
+{
+    [JsonPropertyName("manual_ip")]
+    public string ManualIp { get; set; } = string.Empty;
+
+    [JsonPropertyName("windows_folders")]
+    public List<FolderConfig> WindowsFolders { get; set; } = [];
 }
 
 public sealed class ManifestExchangeResponse
@@ -150,12 +155,27 @@ public static class ConfigManager
         return string.Join('/', topDirs.Concat([flattened]));
     }
 
-    public static bool IsExtensionAllowed(string filePath, List<string> allowedExtensions)
+    public static bool IsExtensionAllowed(string filePath, List<string> allowedExtensions, List<string>? ignoredExtensions = null)
     {
+        string ext = Path.GetExtension(filePath).ToLowerInvariant();
+
+        if (ignoredExtensions != null && ignoredExtensions.Count > 0)
+        {
+            bool isIgnored = ignoredExtensions.Any(e => 
+            {
+                string clean = e.Trim().ToLowerInvariant();
+                return clean == ext || (clean.Length > 0 && $".{clean}" == ext) || clean == "*";
+            });
+            if (isIgnored) return false;
+        }
+
         if (allowedExtensions.Count == 0 || allowedExtensions.Contains("*") || allowedExtensions.Contains(".*"))
             return true;
 
-        string ext = Path.GetExtension(filePath).ToLowerInvariant();
-        return allowedExtensions.Any(e => e.Trim().ToLowerInvariant() == ext || $".{e.Trim().ToLowerInvariant()}" == ext);
+        return allowedExtensions.Any(e => 
+        {
+            string clean = e.Trim().ToLowerInvariant();
+            return clean == ext || (clean.Length > 0 && $".{clean}" == ext);
+        });
     }
 }

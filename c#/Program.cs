@@ -315,8 +315,9 @@ public sealed class ConfigWindow : Form
             MultiSelect = false,
             GridLines = true
         };
-        _listView.Columns.Add("Source Folder Path", 400);
-        _listView.Columns.Add("Matching Extensions", 180);
+        _listView.Columns.Add("Source Folder Path", 300);
+        _listView.Columns.Add("Matching Extensions", 140);
+        _listView.Columns.Add("Ignored Extensions", 140);
         _listView.Columns.Add("Scrub Level", 160);
 
         var actionPanel = new Panel { Dock = DockStyle.Bottom, Height = 45, Padding = new Padding(12, 6, 12, 6) };
@@ -386,6 +387,7 @@ public sealed class ConfigWindow : Form
         {
             var lvi = new ListViewItem(item.Path);
             lvi.SubItems.Add(string.Join(", ", item.Extensions));
+            lvi.SubItems.Add(string.Join(", ", item.IgnoredExtensions));
             lvi.SubItems.Add(FormatScrubLabel(item.ScrubLevel));
             _listView.Items.Add(lvi);
         }
@@ -402,12 +404,12 @@ public sealed class ConfigWindow : Form
     {
         var target = editIndex.HasValue
             ? _foldersList[editIndex.Value]
-            : new FolderConfig { Path = string.Empty, Extensions = ["*"], ScrubLevel = 0 };
+            : new FolderConfig { Path = string.Empty, Extensions = ["*"], IgnoredExtensions = [], ScrubLevel = 0 };
 
         using var dlg = new Form
         {
             Text = editIndex.HasValue ? "Edit Broadcast Folder" : "Add Broadcast Folder",
-            Size = new Size(580, 300),
+            Size = new Size(580, 360),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent,
             MaximizeBox = false,
@@ -435,18 +437,21 @@ public sealed class ConfigWindow : Form
             }
         };
 
-        var extLbl = new Label { Text = "File Filter Extensions (comma-separated, e.g. .md, .png or *):", Top = 76, Left = 16, AutoSize = true };
+        var extLbl = new Label { Text = "Allowed Extensions (comma-separated, e.g. .md, .png or *):", Top = 76, Left = 16, AutoSize = true };
         var extBox = new TextBox { Text = string.Join(", ", target.Extensions), Top = 98, Left = 16, Width = 528 };
 
-        var scrubLbl = new Label { Text = "Folder Scrubbing Level (flatten directory tree):", Top = 138, Left = 16, AutoSize = true };
-        var scrubCb = new ComboBox { Top = 160, Left = 16, Width = 528, DropDownStyle = ComboBoxStyle.DropDownList };
+        var ignoreLbl = new Label { Text = "Ignored/Blacklisted Extensions (comma-separated, e.g. .tmp, .log):", Top = 138, Left = 16, AutoSize = true };
+        var ignoreBox = new TextBox { Text = string.Join(", ", target.IgnoredExtensions), Top = 160, Left = 16, Width = 528 };
+
+        var scrubLbl = new Label { Text = "Folder Scrubbing Level (flatten directory tree):", Top = 200, Left = 16, AutoSize = true };
+        var scrubCb = new ComboBox { Top = 222, Left = 16, Width = 528, DropDownStyle = ComboBoxStyle.DropDownList };
         for (int i = 0; i <= 5; i++) scrubCb.Items.Add(FormatScrubLabel(i));
         scrubCb.SelectedIndex = Math.Clamp(target.ScrubLevel, 0, 5);
 
-        var okBtn = new Button { Text = "Apply", DialogResult = DialogResult.OK, Top = 210, Left = 444, Width = 100, BackColor = Color.FromArgb(2, 132, 199), ForeColor = Color.White };
-        var cancelModalBtn = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Top = 210, Left = 334, Width = 100 };
+        var okBtn = new Button { Text = "Apply", DialogResult = DialogResult.OK, Top = 270, Left = 444, Width = 100, BackColor = Color.FromArgb(2, 132, 199), ForeColor = Color.White };
+        var cancelModalBtn = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Top = 270, Left = 334, Width = 100 };
 
-        dlg.Controls.AddRange([pathLbl, pathBox, browseBtn, extLbl, extBox, scrubLbl, scrubCb, okBtn, cancelModalBtn]);
+        dlg.Controls.AddRange([pathLbl, pathBox, browseBtn, extLbl, extBox, ignoreLbl, ignoreBox, scrubLbl, scrubCb, okBtn, cancelModalBtn]);
         dlg.AcceptButton = okBtn;
         dlg.CancelButton = cancelModalBtn;
 
@@ -462,10 +467,14 @@ public sealed class ConfigWindow : Form
             var parts = extBox.Text.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             var normalizedExts = parts.Length == 0 ? new List<string> { "*" } : parts.Select(p => p.StartsWith('.') || p == "*" ? p : $".{p}").ToList();
 
+            var ignoreParts = ignoreBox.Text.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var normalizedIgnores = ignoreParts.Select(p => p.StartsWith('.') ? p : $".{p}").ToList();
+
             var resultConfig = new FolderConfig
             {
                 Path = chosenPath,
                 Extensions = normalizedExts,
+                IgnoredExtensions = normalizedIgnores,
                 ScrubLevel = scrubCb.SelectedIndex
             };
 
