@@ -6,8 +6,8 @@ High-performance, bidirectional Wi-Fi file synchronization and wireless device e
 
 ## Downloads
 
-* **Windows Host Application (.NET 8):** [Download Mirror.Tool.zip (v1.0)](https://github.com/thefuzzydeveloper/Mirror-Tool-Android/releases/download/v1.0/Mirror.Tool.zip)
-* **Android Receiver App:** [Download MirrorSync.apk (v1.0)](https://github.com/thefuzzydeveloper/Mirror-Tool-Android/releases/download/v1.0/MirrorSync.apk)
+* **Windows Host Application (.NET 8):** [Download Mirror.Tool.zip (v1.5)](https://github.com/thefuzzydeveloper/Mirror-Tool-Android/releases/download/v1.5/Mirror.Tool.zip)
+* **Android Receiver App:** [Download MirrorSync.apk (v1.5)](https://github.com/thefuzzydeveloper/Mirror-Tool-Android/releases/download/v1.5/MirrorSync.apk)
 
 
 ---
