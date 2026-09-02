@@ -1,9 +1,3 @@
-**Short Description**
-
-Mirror Tool is a local Wi-Fi file streaming and synchronization ecosystem that mirrors Windows folders directly to Android devices with real-time directory auditing. Operating entirely over your local network using raw TCP sockets and UDP discovery beacons, it enables sub-second background delta syncing, recursive directory scrubbing, exact mirror pruning, and remote Android filesystem browsing without requiring ADB, cloud services, or USB cables.
-
----
-
 # Mirror Tool (Wi-Fi Auto Stream Sync)
 
 High-performance, bidirectional Wi-Fi file synchronization and wireless device explorer between Windows 10/11 and Android.
