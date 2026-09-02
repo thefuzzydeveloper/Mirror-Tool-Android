@@ -30,15 +30,9 @@ Communication occurs directly over the local network via custom packet frames:
 
 | Port | Protocol | Purpose |
 | --- | --- | --- |
-| **`58421`** | **TCP** | High-throughput data streaming, remote file operations, and manifest negotiation
-
- |
-| **`58422`** | **HTTP** | Manifest inspection, snapshot polling, and manual sync triggers
-
- |
-| **`58423`** | **UDP** | Broadcast auto-discovery beacon between PC and Android devices
-
- |
+| **`58421`** | **TCP** | High-throughput data streaming, remote file operations, and manifest negotiation |
+| **`58422`** | **HTTP** | Manifest inspection, snapshot polling, and manual sync triggers |
+| **`58423`** | **UDP** | Broadcast auto-discovery beacon between PC and Android devices |
 
 ---
 
@@ -85,5 +79,4 @@ Right-click the Windows system tray icon and select **Browse Android Devices & S
 * **Windows Platform:** C# / .NET 8 (Windows Forms), asynchronous sockets (`System.Net.Sockets`), HTTP listener (`HttpListener`).
 * **Android Platform:** Java / Native JNI C integration (`libnative-sync.so`), Android Foreground Service, MediaScanner synchronization.
 * **Payload Chunking:** 4 MB streaming buffer chunks with 16-bit binary headers for payload delivery.
-
 Remember - mirroring android folders to PC is not feasible due to battery restrictions (it is possible, however not feasible)
