@@ -46,6 +46,7 @@ public class SyncService extends Service {
     public static final byte CMD_PUSH_FILE_DIRECT = 0x09;
     public static final byte CMD_DELETE_PATH_DIRECT = 0x0A;
     public static final byte CMD_MKDIR_DIRECT = 0x0B;
+    public static final byte CMD_WAKE_SYNC = 0x0C;
 
     private static final String CHANNEL_ID = "mirror_tcp_channel";
     private static final int NOTIF_ID = 505;
@@ -247,7 +248,17 @@ public class SyncService extends Service {
                 acquireTransferWakeLock(180000L);
                 int cmd = dis.readByte();
 
-                if (cmd == CMD_PING) {
+                if (cmd == CMD_WAKE_SYNC) {
+                    // Demand condition 1: File changed on PC, immediate synchronization woken
+                    broadcastStatus("Waking Up: Remote Changes Detected");
+                    dos.writeByte(0x00);
+                    dos.flush();
+
+                    String pcIp = socket.getInetAddress().getHostAddress();
+                    ensureConfigLoadedFromPc(pcIp);
+                    triggerManifestSyncFromAndroid(pcIp);
+
+                } else if (cmd == CMD_PING) {
                     String pcIp = socket.getInetAddress().getHostAddress();
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                     prefs.edit().putString("last_pc_ip", pcIp).apply();
@@ -618,6 +629,32 @@ public class SyncService extends Service {
         if (!configFile.exists() || configFile.length() == 0) {
             fetchConfigFromPc(this, pcIp, null);
         }
+    }
+
+    private void triggerManifestSyncFromAndroid(final String pcIp) {
+        new Thread(() -> {
+            try {
+                URL url = new URL("http://" + pcIp + ":" + HTTP_MANIFEST_PORT + "/trigger_sync?ip=" + URLEncoder.encode(getDeviceIpAddress(), "UTF-8"));
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(3000);
+                conn.getResponseCode();
+                conn.disconnect();
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
+    private String getDeviceIpAddress() {
+        try {
+            for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (nif.isLoopback() || !nif.isUp()) continue;
+                for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
+                    if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
     }
 
     private void skipStreamBytes(DataInputStream dis, long totalBytes) throws IOException {

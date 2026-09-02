@@ -52,8 +52,8 @@ internal static class Program
         _syncingIcon = TrayIconHelper.CreateDynamicIcon(syncing: true);
 
         _config = ConfigManager.Load();
-        InitializeTray();
         StartEngine();
+        InitializeTray();
 
         _messageFilter = new InstanceMessageFilter(WmActivateApp, ShowOrFocusBrowserWindow);
         Application.AddMessageFilter(_messageFilter);
@@ -68,21 +68,67 @@ internal static class Program
     private static void InitializeTray()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add(new ToolStripMenuItem("Wi-Fi Auto Stream Sync (Active)") { Enabled = false });
+
+        // Header status indicator
+        var headerItem = new ToolStripMenuItem("Mirror Sync Engine") { Enabled = false };
+        headerItem.Font = new Font("Segoe UI", 9f, FontStyle.Italic);
+        menu.Items.Add(headerItem);
         menu.Items.Add(new ToolStripSeparator());
 
-        var browseItem = new ToolStripMenuItem("📱 Browse Android Devices & Storage...")
+        // Group 1: Device Explorer & Storage
+        var browseItem = new ToolStripMenuItem("📂 Open Wireless Device Explorer...")
         {
             Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
         };
         browseItem.Click += (s, e) => ShowOrFocusBrowserWindow();
         menu.Items.Add(browseItem);
 
-        menu.Items.Add("⚡ Verify Manifests & Sync Now", null, (s, e) => _engine?.TriggerSync(null));
-        menu.Items.Add("📋 Inspect Local Manifests...", null, (s, e) => ShowManifestInspector());
-        menu.Items.Add("Configure Sync Folders...", null, (s, e) => ShowOrFocusConfigWindow());
+        menu.Items.Add(new ToolStripSeparator());
 
-        var startupItem = new ToolStripMenuItem("Start with Windows") { Checked = IsStartupEnabled() };
+        // Group 2: Synchronization & Manifest Diagnostics
+        menu.Items.Add("⚡ Sync All Folders Now", null, (s, e) => _engine?.TriggerSync(null));
+        menu.Items.Add("📋 View Live Manifest Dump...", null, (s, e) => ShowManifestInspector());
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        // Group 3: Pairing & Connectivity
+        var discoveryItem = new ToolStripMenuItem("📡 Pairing Discovery (Auto-off in 5 min)")
+        {
+            Checked = _engine?.IsDiscoveryEnabled ?? true,
+            CheckOnClick = true
+        };
+        discoveryItem.Click += (s, e) =>
+        {
+            if (_engine != null)
+            {
+                // If toggled ON manually, set 5-minute auto-expiry to protect CPU
+                _engine.SetDiscoveryMode(discoveryItem.Checked, autoDisableMinutes: discoveryItem.Checked ? 5 : 0);
+            }
+        };
+        menu.Items.Add(discoveryItem);
+
+        // Keep checkbox in sync when 5-minute timer expires automatically
+        if (_engine != null)
+        {
+            _engine.OnDiscoveryStateChanged += enabled =>
+            {
+                if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true)
+                {
+                    _trayIcon.ContextMenuStrip.Invoke((Action)(() => discoveryItem.Checked = enabled));
+                }
+                else
+                {
+                    discoveryItem.Checked = enabled;
+                }
+            };
+        }
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        // Group 4: Settings & Lifecycle
+        menu.Items.Add("⚙️ Manage Synced Folders...", null, (s, e) => ShowOrFocusConfigWindow());
+
+        var startupItem = new ToolStripMenuItem("Run on Windows Startup") { Checked = IsStartupEnabled() };
         startupItem.Click += (s, e) =>
         {
             ToggleStartup(!startupItem.Checked);
@@ -91,7 +137,7 @@ internal static class Program
         menu.Items.Add(startupItem);
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit", null, async (s, e) =>
+        menu.Items.Add("Exit Mirror Sync", null, async (s, e) =>
         {
             if (_trayIcon != null) _trayIcon.Visible = false;
             if (_engine != null) await _engine.DisposeAsync();
@@ -115,6 +161,7 @@ internal static class Program
             }
         };
     }
+
 
     private static void StartEngine()
     {

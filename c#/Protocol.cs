@@ -18,6 +18,9 @@ public static class Protocol
     public const byte CmdDelete = 0x04;
     public const byte CmdSyncEnd = 0x05;
 
+    // Instant wake signal for on-demand synchronization
+    public const byte CmdWakeSync = 0x0C;
+
     // Wireless File Browser & Remote Inspection Commands
     public const byte CmdGetDeviceInfo = 0x06;
     public const byte CmdListDir = 0x07;

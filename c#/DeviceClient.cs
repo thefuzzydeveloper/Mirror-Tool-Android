@@ -602,6 +602,27 @@ public sealed class DeviceClient : IAsyncDisposable
         }
     }
 
+    public async Task<bool> SendWakeSignalAsync(CancellationToken ct = default)
+    {
+        await _networkLock.WaitAsync(ct);
+        try
+        {
+            if (_stream == null) return false;
+            byte[] packet = [Protocol.MagicHeader[0], Protocol.MagicHeader[1], Protocol.CmdWakeSync];
+            await Protocol.SendExactAsync(_stream, packet, ct);
+            return await Protocol.ReadAckAsync(_stream, ct);
+        }
+        catch
+        {
+            DisconnectInternal();
+            return false;
+        }
+        finally
+        {
+            _networkLock.Release();
+        }
+    }
+
     private static async Task<FileStream?> OpenReadWithRetryAsync(string path, int maxRetries = 6, int delayMs = 150, CancellationToken ct = default)
     {
         for (int i = 0; i < maxRetries; i++)

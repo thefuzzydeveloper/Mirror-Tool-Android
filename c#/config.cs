@@ -45,6 +45,12 @@ public sealed class AppConfig
     [JsonPropertyName("manual_ip")]
     public string ManualIp { get; set; } = string.Empty;
 
+    [JsonPropertyName("network_discovery_enabled")]
+    public bool NetworkDiscoveryEnabled { get; set; } = false;
+
+    [JsonPropertyName("known_device_ips")]
+    public List<string> KnownDeviceIps { get; set; } = [];
+
     [JsonPropertyName("windows_folders")]
     public List<FolderConfig> WindowsFolders { get; set; } = [];
 }
