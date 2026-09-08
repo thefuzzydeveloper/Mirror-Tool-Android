@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Text;
 
 namespace WiFiAutoStreamSync;
 
@@ -10,21 +9,28 @@ public static class NetworkDiscovery
     public static List<string> GetActiveIPv4Subnets()
     {
         var ips = new HashSet<string>();
-        foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
+        try
         {
-            if (iface.OperationalStatus != OperationalStatus.Up ||
-                iface.NetworkInterfaceType == NetworkInterfaceType.Loopback)
-                continue;
-
-            foreach (var addr in iface.GetIPProperties().UnicastAddresses)
+            foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
             {
-                if (addr.Address.AddressFamily == AddressFamily.InterNetwork)
+                if (iface.OperationalStatus != OperationalStatus.Up ||
+                    iface.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                    continue;
+
+                foreach (var addr in iface.GetIPProperties().UnicastAddresses)
                 {
-                    string ip = addr.Address.ToString();
-                    if (!ip.StartsWith("127.") && !ip.StartsWith("169.254"))
-                        ips.Add(ip);
+                    if (addr.Address.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        string ip = addr.Address.ToString();
+                        if (!ip.StartsWith("127.") && !ip.StartsWith("169.254"))
+                            ips.Add(ip);
+                    }
                 }
             }
+        }
+        catch (Exception ex)
+        {
+            Program.Log($"GetActiveIPv4Subnets EXCEPTION: {ex.Message}");
         }
         return [.. ips];
     }

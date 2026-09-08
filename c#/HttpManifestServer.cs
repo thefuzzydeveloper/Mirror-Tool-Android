@@ -30,16 +30,27 @@ public sealed class HttpManifestServer : IAsyncDisposable
     {
         try
         {
+            Program.Log($"HttpManifestServer: Attempting to start HttpListener on http://*:{Protocol.HttpManifestPort}/");
             _listener.Start();
             _runTask = RunAsync(_cts.Token);
+            Program.Log("HttpManifestServer: Successfully started on wildcard prefix.");
         }
-        catch (HttpListenerException)
+        catch (HttpListenerException ex)
         {
-            // Requires admin or netsh reservation; fallback to localhost if restricted
-            _listener.Prefixes.Clear();
-            _listener.Prefixes.Add($"http://localhost:{Protocol.HttpManifestPort}/");
-            _listener.Start();
-            _runTask = RunAsync(_cts.Token);
+            Program.Log(string.Format("HttpManifestServer: Wildcard prefix failed ({0}). Falling back to http://localhost:{1}/", ex.Message, Protocol.HttpManifestPort));
+            try
+            {
+                _listener.Prefixes.Clear();
+                _listener.Prefixes.Add($"http://localhost:{Protocol.HttpManifestPort}/");
+                _listener.Start();
+                _runTask = RunAsync(_cts.Token);
+                Program.Log("HttpManifestServer: Successfully started on localhost fallback.");
+            }
+            catch (Exception ex2)
+            {
+                Program.Log($"HttpManifestServer: Localhost fallback also failed: {ex2.Message}");
+                throw;
+            }
         }
     }
 
@@ -53,7 +64,10 @@ public sealed class HttpManifestServer : IAsyncDisposable
                 _ = ProcessRequestAsync(context);
             }
             catch when (ct.IsCancellationRequested) { break; }
-            catch { }
+            catch (Exception ex)
+            {
+                Program.Log(string.Format("HttpManifestServer RunAsync EXCEPTION: {0}", ex.Message));
+            }
         }
     }
 
@@ -95,19 +109,33 @@ public sealed class HttpManifestServer : IAsyncDisposable
                 ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Program.Log($"HttpManifestServer ProcessRequestAsync EXCEPTION: {ex.Message}");
+        }
         finally
         {
-            ctx.Response.Close();
+            try
+            {
+                ctx.Response.Close();
+            }
+            catch { }
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
-        if (_listener.IsListening) _listener.Stop();
-        _listener.Close();
-        if (_runTask != null) await _runTask;
-        _cts.Dispose();
+        try
+        {
+            _cts.Cancel();
+            if (_listener.IsListening) _listener.Stop();
+            _listener.Close();
+            if (_runTask != null) await _runTask;
+            _cts.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Program.Log($"HttpManifestServer Dispose EXCEPTION: {ex.Message}");
+        }
     }
 }

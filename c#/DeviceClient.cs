@@ -15,6 +15,7 @@ public sealed class DeviceClient : IAsyncDisposable
     public string RemoteIp { get; }
     public bool IsConnected => _tcpClient?.Connected ?? false;
     public AndroidDeviceInfo? DeviceInfo { get; set; }
+    public string DeletionAuthToken { get; set; } = string.Empty;
 
     public DeviceClient(string remoteIp)
     {
@@ -43,8 +44,9 @@ public sealed class DeviceClient : IAsyncDisposable
             _stream = _tcpClient.GetStream();
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.ConnectAsync to {RemoteIp} failed: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -92,8 +94,9 @@ public sealed class DeviceClient : IAsyncDisposable
                 ArrayPool<byte>.Shared.Return(payload);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.GetDeviceInfoAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return null;
         }
@@ -139,8 +142,9 @@ public sealed class DeviceClient : IAsyncDisposable
                 ArrayPool<byte>.Shared.Return(payload);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.ListDirectoryAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return null;
         }
@@ -209,8 +213,9 @@ public sealed class DeviceClient : IAsyncDisposable
                 ArrayPool<byte>.Shared.Return(chunkBuffer);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.PullFileAsync EXCEPTION: {ex.Message}");
             if (File.Exists(tempPath)) File.Delete(tempPath);
             DisconnectInternal();
             return false;
@@ -294,8 +299,9 @@ public sealed class DeviceClient : IAsyncDisposable
 
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.PushFileDirectAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -339,17 +345,28 @@ public sealed class DeviceClient : IAsyncDisposable
             if (_stream == null) return false;
 
             byte[] pathBytes = Encoding.UTF8.GetBytes(androidPath);
-            byte[] packet = new byte[3 + 2 + pathBytes.Length];
+            byte[] tokenBytes = Encoding.UTF8.GetBytes(DeletionAuthToken ?? string.Empty);
+
+            byte[] packet = new byte[3 + 2 + tokenBytes.Length + 2 + pathBytes.Length];
             Protocol.MagicHeader.CopyTo(packet, 0);
             packet[2] = Protocol.CmdDeletePathDirect;
-            BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(3, 2), (ushort)pathBytes.Length);
-            pathBytes.CopyTo(packet, 5);
+
+            int offset = 3;
+            BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(offset, 2), (ushort)tokenBytes.Length);
+            offset += 2;
+            tokenBytes.CopyTo(packet, offset);
+            offset += tokenBytes.Length;
+
+            BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(offset, 2), (ushort)pathBytes.Length);
+            offset += 2;
+            pathBytes.CopyTo(packet, offset);
 
             await Protocol.SendExactAsync(_stream, packet, ct);
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.DeletePathDirectAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -376,8 +393,9 @@ public sealed class DeviceClient : IAsyncDisposable
             await Protocol.SendExactAsync(_stream, packet, ct);
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.CreateDirectoryDirectAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -419,8 +437,9 @@ public sealed class DeviceClient : IAsyncDisposable
             await Protocol.SendExactAsync(_stream, jsonBytes, ct);
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.SendConfigAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -467,8 +486,9 @@ public sealed class DeviceClient : IAsyncDisposable
                 ArrayPool<byte>.Shared.Return(respPayload);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.ExchangeManifestAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return null;
         }
@@ -532,8 +552,9 @@ public sealed class DeviceClient : IAsyncDisposable
 
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.StreamFileAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -550,14 +571,20 @@ public sealed class DeviceClient : IAsyncDisposable
         {
             if (_stream == null) return false;
 
+            byte[] tokenBytes = Encoding.UTF8.GetBytes(DeletionAuthToken ?? string.Empty);
             byte[] fIdBytes = Encoding.UTF8.GetBytes(folderId);
             byte[] relBytes = Encoding.UTF8.GetBytes(relTarget);
 
-            byte[] header = new byte[3 + 2 + fIdBytes.Length + 2 + relBytes.Length];
+            byte[] header = new byte[3 + 2 + tokenBytes.Length + 2 + fIdBytes.Length + 2 + relBytes.Length];
             Protocol.MagicHeader.CopyTo(header, 0);
             header[2] = Protocol.CmdDelete;
 
             int offset = 3;
+            BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(offset, 2), (ushort)tokenBytes.Length);
+            offset += 2;
+            tokenBytes.CopyTo(header, offset);
+            offset += tokenBytes.Length;
+
             BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(offset, 2), (ushort)fIdBytes.Length);
             offset += 2;
             fIdBytes.CopyTo(header, offset);
@@ -570,8 +597,9 @@ public sealed class DeviceClient : IAsyncDisposable
             await Protocol.SendExactAsync(_stream, header, ct);
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.SendDeleteAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -591,8 +619,9 @@ public sealed class DeviceClient : IAsyncDisposable
             await Protocol.SendExactAsync(_stream, packet, ct);
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.NotifySyncCompleteAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -612,8 +641,9 @@ public sealed class DeviceClient : IAsyncDisposable
             await Protocol.SendExactAsync(_stream, packet, ct);
             return await Protocol.ReadAckAsync(_stream, ct);
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"DeviceClient.SendWakeSignalAsync EXCEPTION: {ex.Message}");
             DisconnectInternal();
             return false;
         }
@@ -642,9 +672,17 @@ public sealed class DeviceClient : IAsyncDisposable
 
     private void DisconnectInternal()
     {
-        _stream?.Dispose();
+        try
+        {
+            _stream?.Dispose();
+        }
+        catch { }
         _stream = null;
-        _tcpClient?.Dispose();
+        try
+        {
+            _tcpClient?.Dispose();
+        }
+        catch { }
         _tcpClient = null;
     }
 

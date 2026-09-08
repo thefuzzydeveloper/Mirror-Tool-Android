@@ -30,7 +30,6 @@ public sealed class DeviceBrowserWindow : Form
         _iconsList.Images.Add("folder", CreateFolderBitmap());
         _iconsList.Images.Add("file", SystemIcons.Application);
 
-        // Top Control: Device Selector
         var topPanel = new Panel { Dock = DockStyle.Top, Height = 48, Padding = new Padding(12, 8, 12, 8), BackColor = Color.FromArgb(241, 245, 249) };
         var lblDev = new Label { Text = "Connected Android Device:", AutoSize = true, Dock = DockStyle.Left, Padding = new Padding(0, 6, 8, 0), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) };
         _deviceSelector = new ComboBox { Dock = DockStyle.Left, Width = 380, DropDownStyle = ComboBoxStyle.DropDownList };
@@ -43,7 +42,6 @@ public sealed class DeviceBrowserWindow : Form
         topPanel.Controls.Add(lblDev);
         topPanel.Controls.Add(btnRefreshDevs);
 
-        // Navigation & Action Toolbar
         var navPanel = new Panel { Dock = DockStyle.Top, Height = 44, Padding = new Padding(10, 6, 10, 6) };
         var btnUp = new Button { Text = "⬆ Up", Width = 65, Dock = DockStyle.Left };
         btnUp.Click += async (s, e) => await NavigateUpAsync();
@@ -84,7 +82,6 @@ public sealed class DeviceBrowserWindow : Form
         navPanel.Controls.Add(btnUpload);
         navPanel.Controls.Add(btnInspectManifest);
 
-        // File List Details
         _fileListView = new ListView
         {
             Dock = DockStyle.Fill,
@@ -114,7 +111,6 @@ public sealed class DeviceBrowserWindow : Form
             }
         };
 
-        // Context Menu for Items
         var ctxMenu = new ContextMenuStrip();
         ctxMenu.Items.Add("💾 Save File to Specific PC Location...", null, async (s, e) => await SaveSelectedFileToLocationAsync());
         ctxMenu.Items.Add("📁 Save Selected Folder to PC Location...", null, async (s, e) => await SaveSelectedFolderToLocationAsync());
@@ -130,7 +126,6 @@ public sealed class DeviceBrowserWindow : Form
         ctxMenu.Items.Add("🗑 Delete on Android", null, async (s, e) => await DeleteSelectedItemAsync());
         _fileListView.ContextMenuStrip = ctxMenu;
 
-        // Bottom Status Bar
         var statusStrip = new StatusStrip();
         _statusLabel = new ToolStripStatusLabel { Text = "Ready", Spring = true, TextAlign = ContentAlignment.MiddleLeft };
         _progressBar = new ToolStripProgressBar { Width = 160, Visible = false };
@@ -177,18 +172,6 @@ public sealed class DeviceBrowserWindow : Form
         _deviceSelector.SelectedIndex = 0;
     }
 
-    private async Task CreateNewFolderAsync()
-    {
-        if (_currentClient == null || !_currentClient.IsConnected) return;
-
-        string folderName = ShowInputDialog(this, "Enter new folder name:", "Create Folder on Android", "NewFolder");
-        if (string.IsNullOrWhiteSpace(folderName)) return;
-
-        string target = $"{_currentPath.TrimEnd('/')}/{folderName.Trim()}";
-        bool ok = await _currentClient.CreateDirectoryDirectAsync(target);
-        if (ok) await LoadDirectoryAsync(_currentPath);
-    }
-
     private async Task OnDeviceSelectionChangedAsync()
     {
         if (_deviceSelector.SelectedItem is DeviceComboItem selected)
@@ -212,16 +195,13 @@ public sealed class DeviceBrowserWindow : Form
         using var g = Graphics.FromImage(bmp);
         g.Clear(Color.Transparent);
 
-        // Folder tab
-        using var tabBrush = new SolidBrush(Color.FromArgb(217, 119, 6)); // amber-600
+        using var tabBrush = new SolidBrush(Color.FromArgb(217, 119, 6));
         g.FillRectangle(tabBrush, 1, 2, 7, 4);
 
-        // Folder body
-        using var bodyBrush = new SolidBrush(Color.FromArgb(245, 158, 11)); // amber-500
+        using var bodyBrush = new SolidBrush(Color.FromArgb(245, 158, 11));
         g.FillRectangle(bodyBrush, 1, 5, 16, 11);
 
-        // Border outline
-        using var borderPen = new Pen(Color.FromArgb(180, 83, 9), 1f); // amber-700
+        using var borderPen = new Pen(Color.FromArgb(180, 83, 9), 1f);
         g.DrawRectangle(borderPen, 1, 5, 15, 10);
 
         return bmp;
@@ -298,9 +278,6 @@ public sealed class DeviceBrowserWindow : Form
         await LoadDirectoryAsync(parent);
     }
 
-    /// <summary>
-    /// Prompts user with a standard Windows SaveFileDialog to save any Android file to an exact PC location.
-    /// </summary>
     private async Task SaveSelectedFileToLocationAsync()
     {
         if (_currentClient == null || _fileListView.SelectedItems.Count == 0) return;
@@ -340,9 +317,6 @@ public sealed class DeviceBrowserWindow : Form
         }
     }
 
-    /// <summary>
-    /// Prompts user with a standard FolderBrowserDialog to save an Android folder and its contents to Windows.
-    /// </summary>
     private async Task SaveSelectedFolderToLocationAsync()
     {
         if (_currentClient == null || _fileListView.SelectedItems.Count == 0) return;
@@ -477,9 +451,29 @@ public sealed class DeviceBrowserWindow : Form
 
         if (MessageBox.Show(this, $"Are you sure you want to permanently delete:\n{item.Name}?", "Confirm Deletion", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
         {
+            if (string.IsNullOrEmpty(_currentClient.DeletionAuthToken))
+            {
+                string token = ShowInputDialog(this, "Enter 6-digit Deletion PIN displayed in the Android app:", "Deletion Authentication Required", "");
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    _statusLabel.Text = "Deletion cancelled: Authentication PIN required.";
+                    return;
+                }
+                _currentClient.DeletionAuthToken = token.Trim();
+            }
+
             _statusLabel.Text = $"Deleting {item.Name}...";
             bool ok = await _currentClient.DeletePathDirectAsync(item.Path);
-            _statusLabel.Text = ok ? "Deleted successfully." : "Deletion failed.";
+            if (!ok)
+            {
+                _currentClient.DeletionAuthToken = string.Empty;
+                MessageBox.Show(this, "Deletion rejected by Android device!\nEnsure 'Allow Remote Deletions' is enabled on your phone and the PIN is correct.", "Authentication Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _statusLabel.Text = "Deletion unauthorized.";
+            }
+            else
+            {
+                _statusLabel.Text = "Deleted successfully.";
+            }
             await LoadDirectoryAsync(_currentPath);
         }
     }

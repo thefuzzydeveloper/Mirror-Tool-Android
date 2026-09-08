@@ -47,6 +47,10 @@ public class SyncService extends Service {
     public static final byte CMD_DELETE_PATH_DIRECT = 0x0A;
     public static final byte CMD_MKDIR_DIRECT = 0x0B;
     public static final byte CMD_WAKE_SYNC = 0x0C;
+    public static final byte CMD_SET_DELETION_TOKEN = 0x0D;
+
+    public static volatile String activeDeletionPin = "";
+    public static volatile boolean isDeletionAllowed = false;
 
     private static final String CHANNEL_ID = "mirror_tcp_channel";
     private static final int NOTIF_ID = 505;
@@ -375,10 +379,17 @@ public class SyncService extends Service {
                     dos.flush();
 
                 } else if (cmd == CMD_DELETE) {
+                    int tokenLen = dis.readUnsignedShort();
+                    byte[] tokenBytes = new byte[tokenLen];
+                    dis.readFully(tokenBytes);
+                    String presentedToken = new String(tokenBytes, "UTF-8");
+
                     int fIdLen = dis.readUnsignedShort();
                     byte[] fIdBytes = new byte[fIdLen];
                     dis.readFully(fIdBytes);
                     String folderId = new String(fIdBytes, "UTF-8");
+
+                    boolean authPassed = isDeletionAllowed && !activeDeletionPin.isEmpty() && activeDeletionPin.equals(presentedToken);
 
                     int relLen = dis.readUnsignedShort();
                     byte[] relBytes = new byte[relLen];
@@ -393,9 +404,18 @@ public class SyncService extends Service {
                         targetRoot = getTargetDirectoryFallback(folderId);
                     }
 
-                    if (isEnabled && !relPath.isEmpty() && !relPath.equals(".")) {
-                        File target = new File(targetRoot, relPath);
-                        if (target.exists() && !target.equals(new File(targetRoot))) {
+                    if (!authPassed) {
+                        broadcastStatus("Blocked unauthorized deletion attempt!");
+                        dos.writeByte(0x02); // 0x02: Unauthorized
+                        dos.flush();
+                        continue;
+                    }
+
+                    if (isEnabled && !relPath.isEmpty() && !relPath.equals(".") && !relPath.contains("..")) {
+                        File root = new File(targetRoot).getCanonicalFile();
+                        File target = new File(root, relPath).getCanonicalFile();
+
+                        if (target.getPath().startsWith(root.getPath() + File.separator) && target.exists()) {
                             deleteRecursive(target);
                             rescanMediaStorePath(target.getAbsolutePath());
                         }
@@ -553,15 +573,31 @@ public class SyncService extends Service {
                     dos.flush();
 
                 } else if (cmd == CMD_DELETE_PATH_DIRECT) {
+                    int tokenLen = dis.readUnsignedShort();
+                    byte[] tokenBytes = new byte[tokenLen];
+                    dis.readFully(tokenBytes);
+                    String presentedToken = new String(tokenBytes, "UTF-8");
+
                     int pathLen = dis.readUnsignedShort();
                     byte[] pathBytes = new byte[pathLen];
                     dis.readFully(pathBytes);
                     String targetPath = new String(pathBytes, "UTF-8");
 
-                    File target = new File(targetPath);
-                    if (target.exists()) {
-                        deleteRecursive(target);
-                        rescanMediaStorePath(targetPath);
+                    boolean authPassed = isDeletionAllowed && !activeDeletionPin.isEmpty() && activeDeletionPin.equals(presentedToken);
+
+                    if (!authPassed) {
+                        broadcastStatus("Blocked unauthorized remote file wipe!");
+                        dos.writeByte(0x02); // 0x02: Unauthorized
+                        dos.flush();
+                        continue;
+                    }
+
+                    if (isDeletionPathSafe(targetPath)) {
+                        File target = new File(targetPath).getCanonicalFile();
+                        if (target.exists()) {
+                            deleteRecursive(target);
+                            rescanMediaStorePath(targetPath);
+                        }
                     }
                     dos.writeByte(0x00);
                     dos.flush();
@@ -642,6 +678,107 @@ public class SyncService extends Service {
             } catch (Exception ignored) {}
         }).start();
     }
+
+    private boolean isDeletionPathSafe(String targetPath) {
+        if (targetPath == null || targetPath.trim().isEmpty()) {
+            return false;
+        }
+
+        try {
+            File file = new File(targetPath).getCanonicalFile();
+            String canonical = file.getPath();
+
+            // 1. Never allow root, internal storage base, or top-level SD card wipes
+            File extStorage = Environment.getExternalStorageDirectory().getCanonicalFile();
+            if (canonical.equals(extStorage.getPath()) || canonical.equals("/") || canonical.equals("/storage/emulated")) {
+                return false;
+            }
+
+            // 2. Blacklist system-critical directories
+            String lower = canonical.toLowerCase(Locale.ROOT);
+            if (lower.startsWith(new File(extStorage, "Android").getCanonicalPath().toLowerCase(Locale.ROOT))) {
+                return false;
+            }
+
+            // 3. Ensure the target path resides strictly within an authorized sync directory
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            File configFile = new File(getFilesDir(), "windows_sources.json");
+            
+            if (!configFile.exists()) {
+                return false;
+            }
+
+            byte[] b = new byte[(int) configFile.length()];
+            try (FileInputStream fis = new FileInputStream(configFile)) {
+                fis.read(b);
+            }
+            JSONArray arr = new JSONArray(new String(b, "UTF-8"));
+
+            boolean insideAllowedBoundary = false;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.getJSONObject(i);
+                String folderId = obj.optString("id");
+                String defaultDir = "/storage/emulated/0/" + obj.optString("name");
+                String mappedTarget = prefs.getString(folderId, defaultDir);
+
+                File allowedRoot = new File(mappedTarget).getCanonicalFile();
+                // Allow deletion only if the target is a SUB-PATH of the root, not the root directory itself
+                if (canonical.startsWith(allowedRoot.getPath() + File.separator)) {
+                    insideAllowedBoundary = true;
+                    break;
+                }
+            }
+
+            return insideAllowedBoundary;
+
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+//NOTE if you wish to make deletion outside of synced folder as well, implment following function note that it maybe unsafe!
+
+    // private boolean isDeletionPathSafe(String targetPath) {
+    //     if (targetPath == null || targetPath.trim().isEmpty()) {
+    //         return false;
+    //     }
+
+    //     try {
+    //         File file = new File(targetPath).getCanonicalFile();
+    //         String canonical = file.getPath();
+
+    //         // 1. Never allow root, internal storage base, or top-level volume wipes
+    //         File extStorage = Environment.getExternalStorageDirectory().getCanonicalFile();
+    //         String extPath = extStorage.getPath();
+
+    //         if (canonical.equals("/") || 
+    //             canonical.equals("/storage") || 
+    //             canonical.equals("/storage/emulated") || 
+    //             canonical.equals(extPath) || 
+    //             canonical.equals("/sdcard")) {
+    //             return false;
+    //         }
+
+    //         // 2. Blacklist OS and system-critical app container hierarchies
+    //         String lower = canonical.toLowerCase(Locale.ROOT);
+    //         String androidSystemDir = new File(extStorage, "Android").getCanonicalPath().toLowerCase(Locale.ROOT);
+
+    //         if (lower.equals(androidSystemDir) || lower.startsWith(androidSystemDir + File.separator)) {
+    //             return false;
+    //         }
+
+    //         if (lower.startsWith("/system") || lower.startsWith("/data") || lower.startsWith("/proc") || lower.startsWith("/sys")) {
+    //             return false;
+    //         }
+
+    //         // Path is outside critical system roots; allow deletion
+    //         return true;
+
+    //     } catch (Exception e) {
+    //         return false;
+    //     }
+    // }
+
 
     private String getDeviceIpAddress() {
         try {
@@ -928,8 +1065,7 @@ public class SyncService extends Service {
                 }
             }
         }
-    }
-
+    }   
     private void deleteRecursive(File fileOrDirectory) {
         if (fileOrDirectory.isDirectory()) {
             File[] children = fileOrDirectory.listFiles();

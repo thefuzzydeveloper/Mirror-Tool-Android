@@ -40,6 +40,7 @@ public sealed class FolderWirePayload
     [JsonPropertyName("scrub_level")]
     public int ScrubLevel { get; set; }
 }
+
 public sealed class AppConfig
 {
     [JsonPropertyName("manual_ip")]
@@ -70,7 +71,6 @@ public sealed class ManifestExchangeResponse
     public List<string> Needed { get; set; } = [];
 }
 
-// Remote Android Browser Data Contracts
 public sealed class AndroidRootDir
 {
     [JsonPropertyName("name")] public string Name { get; set; } = string.Empty;
@@ -110,37 +110,49 @@ public static class ConfigManager
 
     public static AppConfig Load()
     {
-        if (!File.Exists(ConfigPath))
-        {
-            var fallback = new AppConfig
-            {
-                WindowsFolders = [
-                    new FolderConfig {
-                        Path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SyncWorkspace"),
-                        Extensions = ["*"],
-                        ScrubLevel = 0
-                    }
-                ]
-            };
-            Save(fallback);
-            return fallback;
-        }
-
         try
         {
+            Program.Log($"ConfigManager.Load: Checking path {ConfigPath}");
+            if (!File.Exists(ConfigPath))
+            {
+                Program.Log("ConfigManager.Load: Config file not found. Creating fallback default config.");
+                var fallback = new AppConfig
+                {
+                    WindowsFolders = [
+                        new FolderConfig {
+                            Path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SyncWorkspace"),
+                            Extensions = ["*"],
+                            ScrubLevel = 0
+                        }
+                    ]
+                };
+                Save(fallback);
+                return fallback;
+            }
+
             string json = File.ReadAllText(ConfigPath);
+            Program.Log("ConfigManager.Load: Successfully read config file. Deserializing...");
             return JsonSerializer.Deserialize<AppConfig>(json) ?? new AppConfig();
         }
-        catch
+        catch (Exception ex)
         {
+            Program.Log($"ConfigManager.Load EXCEPTION: {ex.Message}. Returning default AppConfig.");
             return new AppConfig();
         }
     }
 
     public static void Save(AppConfig config)
     {
-        string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(ConfigPath, json);
+        try
+        {
+            string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(ConfigPath, json);
+            Program.Log("ConfigManager.Save: Successfully saved config.");
+        }
+        catch (Exception ex)
+        {
+            Program.Log($"ConfigManager.Save EXCEPTION: {ex.Message}");
+        }
     }
 
     public static string ComputeFolderId(string folderPath)

@@ -10,24 +10,21 @@ public static class Protocol
     public const int UdpBeaconPort = 58423;
     public const int ChunkStreamSize = 4 * 1024 * 1024; // 4MB chunks
 
-    // Existing commands
     public const byte CmdPing = 0x00;
     public const byte CmdConfig = 0x01;
     public const byte CmdManifestExchange = 0x02;
     public const byte CmdFileStream = 0x03;
     public const byte CmdDelete = 0x04;
     public const byte CmdSyncEnd = 0x05;
-
-    // Instant wake signal for on-demand synchronization
     public const byte CmdWakeSync = 0x0C;
 
-    // Wireless File Browser & Remote Inspection Commands
     public const byte CmdGetDeviceInfo = 0x06;
     public const byte CmdListDir = 0x07;
     public const byte CmdPullFile = 0x08;
     public const byte CmdPushFileDirect = 0x09;
     public const byte CmdDeletePathDirect = 0x0A;
     public const byte CmdMkdirDirect = 0x0B;
+    public const byte CmdSetDeletionToken = 0x0D;
 
     public static async ValueTask SendExactAsync(Stream stream, ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
     {

@@ -33,16 +33,27 @@ public sealed class SyncEngine : IAsyncDisposable
 
     public void Start()
     {
-        _httpServer = new HttpManifestServer(GetFoldersConfig, GetManifestsPayload, TriggerSync);
-        _httpServer.Start();
+        try
+        {
+            Program.Log("SyncEngine.Start: Initializing HttpManifestServer...");
+            _httpServer = new HttpManifestServer(GetFoldersConfig, GetManifestsPayload, TriggerSync);
+            _httpServer.Start();
 
-        _supervisorLoop = Task.Run(() => MaintainConnectionsAsync(_cts.Token));
-        _udpLoop = Task.Run(() => RunUdpBeaconAsync(_cts.Token));
+            Program.Log("SyncEngine.Start: Starting supervisor and UDP beacon loops...");
+            _supervisorLoop = Task.Run(() => MaintainConnectionsAsync(_cts.Token));
+            _udpLoop = Task.Run(() => RunUdpBeaconAsync(_cts.Token));
 
-        SetupFileSystemWatchers();
+            Program.Log("SyncEngine.Start: Setting up FileSystemWatchers...");
+            SetupFileSystemWatchers();
 
-        // Automatically turn on discovery on first launch/reboot for 5 minutes
-        SetDiscoveryMode(true, autoDisableMinutes: 5);
+            SetDiscoveryMode(true, autoDisableMinutes: 5);
+            Program.Log("SyncEngine.Start completed successfully.");
+        }
+        catch (Exception ex)
+        {
+            Program.Log(string.Format("SyncEngine.Start EXCEPTION: {0}", ex.Message));
+            throw;
+        }
     }
 
     public bool IsDiscoveryEnabled => _config.NetworkDiscoveryEnabled;
@@ -85,22 +96,29 @@ public sealed class SyncEngine : IAsyncDisposable
     {
         foreach (var folder in _config.WindowsFolders)
         {
-            if (!Directory.Exists(folder.Path))
-                Directory.CreateDirectory(folder.Path);
-
-            var fsw = new FileSystemWatcher(folder.Path)
+            try
             {
-                IncludeSubdirectories = true,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.DirectoryName | NotifyFilters.Size
-            };
+                if (!Directory.Exists(folder.Path))
+                    Directory.CreateDirectory(folder.Path);
 
-            fsw.Created += (s, e) => ScheduleFolderManifestSync(folder);
-            fsw.Changed += (s, e) => ScheduleFolderManifestSync(folder);
-            fsw.Deleted += (s, e) => ScheduleFolderManifestSync(folder);
-            fsw.Renamed += (s, e) => ScheduleFolderManifestSync(folder);
+                var fsw = new FileSystemWatcher(folder.Path)
+                {
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.DirectoryName | NotifyFilters.Size
+                };
 
-            fsw.EnableRaisingEvents = true;
-            _watchers.Add(fsw);
+                fsw.Created += (s, e) => ScheduleFolderManifestSync(folder);
+                fsw.Changed += (s, e) => ScheduleFolderManifestSync(folder);
+                fsw.Deleted += (s, e) => ScheduleFolderManifestSync(folder);
+                fsw.Renamed += (s, e) => ScheduleFolderManifestSync(folder);
+
+                fsw.EnableRaisingEvents = true;
+                _watchers.Add(fsw);
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"SetupFileSystemWatchers EXCEPTION for folder '{folder.Path}': {ex.Message}");
+            }
         }
     }
 
@@ -127,7 +145,7 @@ public sealed class SyncEngine : IAsyncDisposable
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[Watcher Sync Error] {ex.Message}");
+                Program.Log($"[Watcher Sync Error] {ex.Message}");
             }
             finally
             {
@@ -179,7 +197,6 @@ public sealed class SyncEngine : IAsyncDisposable
                 var report = await client.ExchangeManifestAsync(folderId, winManifest, ct);
                 if (report == null) continue;
 
-                // Transfer ONLY what Android reported is actually needed
                 if (report.Needed.Count > 0)
                 {
                     foreach (var neededRel in report.Needed)
@@ -211,55 +228,61 @@ public sealed class SyncEngine : IAsyncDisposable
     {
         while (!ct.IsCancellationRequested)
         {
-            bool changed = false;
-            foreach (var (ip, client) in _clients)
+            try
             {
-                if (!client.IsConnected)
+                bool changed = false;
+                foreach (var (ip, client) in _clients)
                 {
-                    await client.DisposeAsync();
-                    if (_clients.TryRemove(ip, out _))
-                        changed = true;
+                    if (!client.IsConnected)
+                    {
+                        await client.DisposeAsync();
+                        if (_clients.TryRemove(ip, out _))
+                            changed = true;
+                    }
                 }
-            }
 
-            var connectedIps = _clients.Keys.ToHashSet();
+                var connectedIps = _clients.Keys.ToHashSet();
 
-            // 1. Always attempt reconnecting to known paired devices and manual IPs
-            var targetsToVerify = new HashSet<string>(_config.KnownDeviceIps, StringComparer.OrdinalIgnoreCase);
-            if (!string.IsNullOrWhiteSpace(_config.ManualIp))
-            {
-                foreach (var ip in _config.ManualIp.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-                    targetsToVerify.Add(ip);
-            }
-
-            foreach (var ip in targetsToVerify)
-            {
-                if (ct.IsCancellationRequested) break;
-                if (!connectedIps.Contains(ip))
+                var targetsToVerify = new HashSet<string>(_config.KnownDeviceIps, StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(_config.ManualIp))
                 {
-                    if (await ConnectSingleDeviceAsync(ip, ct))
-                        changed = true;
+                    foreach (var ip in _config.ManualIp.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                        targetsToVerify.Add(ip);
                 }
-            }
 
-            // 2. Scan entire subnet ONLY when pairing mode is active
-            if (_config.NetworkDiscoveryEnabled)
-            {
-                var discovered = await NetworkDiscovery.ScanSubnetDevicesAsync(_config.ManualIp, connectedIps, ct);
-                foreach (var ip in discovered)
+                foreach (var ip in targetsToVerify)
                 {
                     if (ct.IsCancellationRequested) break;
-                    if (await ConnectSingleDeviceAsync(ip, ct))
-                        changed = true;
+                    if (!connectedIps.Contains(ip))
+                    {
+                        if (await ConnectSingleDeviceAsync(ip, ct))
+                            changed = true;
+                    }
                 }
-            }
 
-            if (changed)
+                if (_config.NetworkDiscoveryEnabled)
+                {
+                    var discovered = await NetworkDiscovery.ScanSubnetDevicesAsync(_config.ManualIp, connectedIps, ct);
+                    foreach (var ip in discovered)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        if (await ConnectSingleDeviceAsync(ip, ct))
+                            changed = true;
+                    }
+                }
+
+                if (changed)
+                {
+                    OnDevicesChanged?.Invoke();
+                }
+
+                UpdateTrayState();
+            }
+            catch (Exception ex)
             {
-                OnDevicesChanged?.Invoke();
+                Program.Log($"MaintainConnectionsAsync loop EXCEPTION: {ex.Message}");
             }
 
-            UpdateTrayState();
             await Task.Delay(_config.NetworkDiscoveryEnabled ? 4000 : 15000, ct);
         }
     }
@@ -277,7 +300,6 @@ public sealed class SyncEngine : IAsyncDisposable
 
                 if (_clients.TryAdd(ip, client))
                 {
-                    // Persist device IP so reconnection works even after discovery expires
                     if (!_config.KnownDeviceIps.Contains(ip, StringComparer.OrdinalIgnoreCase))
                     {
                         _config.KnownDeviceIps.Add(ip);
@@ -358,6 +380,10 @@ public sealed class SyncEngine : IAsyncDisposable
             _statusCallback("Active", false);
             UpdateTrayState();
         }
+        catch (Exception ex)
+        {
+            Program.Log($"SyncFullDeviceAuditAsync EXCEPTION: {ex.Message}");
+        }
         finally
         {
             _syncThrottleLock.Release();
@@ -366,60 +392,67 @@ public sealed class SyncEngine : IAsyncDisposable
 
     private async Task RunUdpBeaconAsync(CancellationToken ct)
     {
-        using var udp = new UdpClient();
-        udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        udp.Client.Bind(new IPEndPoint(IPAddress.Any, Protocol.UdpBeaconPort));
-
-        var lastAnnounce = DateTime.MinValue;
-
-        while (!ct.IsCancellationRequested)
+        try
         {
-            // Only proactively spam UDP beacons to the subnet if pairing discovery is active
-            if (_config.NetworkDiscoveryEnabled && (DateTime.UtcNow - lastAnnounce).TotalSeconds > 4)
+            using var udp = new UdpClient();
+            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            udp.Client.Bind(new IPEndPoint(IPAddress.Any, Protocol.UdpBeaconPort));
+
+            var lastAnnounce = DateTime.MinValue;
+
+            while (!ct.IsCancellationRequested)
             {
-                lastAnnounce = DateTime.UtcNow;
-                foreach (var ip in NetworkDiscovery.GetActiveIPv4Subnets())
+                if (_config.NetworkDiscoveryEnabled && (DateTime.UtcNow - lastAnnounce).TotalSeconds > 4)
                 {
-                    var parts = ip.Split('.');
-                    if (parts.Length == 4)
+                    lastAnnounce = DateTime.UtcNow;
+                    foreach (var ip in NetworkDiscovery.GetActiveIPv4Subnets())
                     {
-                        var bcast = IPAddress.Parse($"{parts[0]}.{parts[1]}.{parts[2]}.255");
-                        byte[] msg = Encoding.UTF8.GetBytes($"MIRROR_PC_ANNOUNCE:{ip}");
-                        await udp.SendAsync(msg, msg.Length, new IPEndPoint(bcast, Protocol.UdpBeaconPort));
-                    }
-                }
-            }
-
-            // Zero CPU: Always answer incoming demand requests from phones searching for PC IP
-            try
-            {
-                var receiveTask = udp.ReceiveAsync(ct).AsTask();
-                var completedTask = await Task.WhenAny(receiveTask, Task.Delay(1000, ct));
-
-                if (completedTask == receiveTask)
-                {
-                    var res = await receiveTask;
-                    string text = Encoding.UTF8.GetString(res.Buffer).Trim();
-
-                    if (text.StartsWith("MIRROR_PHONE_ANNOUNCE:"))
-                    {
-                        string phoneIp = text.Split(':', 2)[1].Trim();
-                        if (string.IsNullOrEmpty(phoneIp)) phoneIp = res.RemoteEndPoint.Address.ToString();
-                        _ = ConnectSingleDeviceAsync(phoneIp, ct);
-                    }
-                    else if (text == "MIRROR_QUERY_PC")
-                    {
-                        // Always respond with PC IP so the phone immediately finds this machine on-demand
-                        foreach (var ip in NetworkDiscovery.GetActiveIPv4Subnets())
+                        var parts = ip.Split('.');
+                        if (parts.Length == 4)
                         {
-                            byte[] reply = Encoding.UTF8.GetBytes($"MIRROR_PC_ANNOUNCE:{ip}");
-                            await udp.SendAsync(reply, reply.Length, res.RemoteEndPoint);
+                            var bcast = IPAddress.Parse($"{parts[0]}.{parts[1]}.{parts[2]}.255");
+                            byte[] msg = Encoding.UTF8.GetBytes($"MIRROR_PC_ANNOUNCE:{ip}");
+                            await udp.SendAsync(msg, msg.Length, new IPEndPoint(bcast, Protocol.UdpBeaconPort));
                         }
                     }
                 }
+
+                try
+                {
+                    var receiveTask = udp.ReceiveAsync(ct).AsTask();
+                    var completedTask = await Task.WhenAny(receiveTask, Task.Delay(1000, ct));
+
+                    if (completedTask == receiveTask)
+                    {
+                        var res = await receiveTask;
+                        string text = Encoding.UTF8.GetString(res.Buffer).Trim();
+
+                        if (text.StartsWith("MIRROR_PHONE_ANNOUNCE:"))
+                        {
+                            string phoneIp = text.Split(':', 2)[1].Trim();
+                            if (string.IsNullOrEmpty(phoneIp)) phoneIp = res.RemoteEndPoint.Address.ToString();
+                            _ = ConnectSingleDeviceAsync(phoneIp, ct);
+                        }
+                        else if (text == "MIRROR_QUERY_PC")
+                        {
+                            foreach (var ip in NetworkDiscovery.GetActiveIPv4Subnets())
+                            {
+                                byte[] reply = Encoding.UTF8.GetBytes($"MIRROR_PC_ANNOUNCE:{ip}");
+                                await udp.SendAsync(reply, reply.Length, res.RemoteEndPoint);
+                            }
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    Program.Log(string.Format("RunUdpBeaconAsync inner EXCEPTION: {0}", ex.Message));
+                }
             }
-            catch (OperationCanceledException) { break; }
-            catch { }
+        }
+        catch (Exception ex)
+        {
+            Program.Log(string.Format("RunUdpBeaconAsync FATAL EXCEPTION: {0}", ex.Message));
         }
     }
 
@@ -500,30 +533,37 @@ public sealed class SyncEngine : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
-        _discoveryTimerCts?.Cancel();
-        _discoveryTimerCts?.Dispose();
-
-        foreach (var cts in _debounceMap.Values)
+        try
         {
-            cts.Cancel();
-            cts.Dispose();
-        }
-        _debounceMap.Clear();
+            _cts.Cancel();
+            _discoveryTimerCts?.Cancel();
+            _discoveryTimerCts?.Dispose();
 
-        foreach (var w in _watchers)
+            foreach (var cts in _debounceMap.Values)
+            {
+                cts.Cancel();
+                cts.Dispose();
+            }
+            _debounceMap.Clear();
+
+            foreach (var w in _watchers)
+            {
+                w.EnableRaisingEvents = false;
+                w.Dispose();
+            }
+
+            if (_httpServer != null) await _httpServer.DisposeAsync();
+
+            foreach (var client in _clients.Values)
+                await client.DisposeAsync();
+
+            _clients.Clear();
+            _cts.Dispose();
+            _syncThrottleLock.Dispose();
+        }
+        catch (Exception ex)
         {
-            w.EnableRaisingEvents = false;
-            w.Dispose();
+            Program.Log($"SyncEngine Dispose EXCEPTION: {ex.Message}");
         }
-
-        if (_httpServer != null) await _httpServer.DisposeAsync();
-
-        foreach (var client in _clients.Values)
-            await client.DisposeAsync();
-
-        _clients.Clear();
-        _cts.Dispose();
-        _syncThrottleLock.Dispose();
     }
 }

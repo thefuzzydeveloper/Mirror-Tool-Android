@@ -225,6 +225,41 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
         pcIpRow.addView(tvLabel);
         pcIpRow.addView(etPcIpOverride);
 
+        // Security Barrier for File Deletion
+        LinearLayout deletionSecurityRow = new LinearLayout(this);
+        deletionSecurityRow.setOrientation(LinearLayout.HORIZONTAL);
+        deletionSecurityRow.setPadding(0, 10, 0, 0);
+
+        final CheckBox chkAllowDeletions = new CheckBox(this);
+        chkAllowDeletions.setText("Allow Remote Deletions");
+        chkAllowDeletions.setTextColor(Color.parseColor("#FCA5A5"));
+        chkAllowDeletions.setTextSize(12);
+
+        final TextView tvDeletionPin = new TextView(this);
+        tvDeletionPin.setText(" [PIN: LOCKED]");
+        tvDeletionPin.setTextColor(Color.parseColor("#94A3B8"));
+        tvDeletionPin.setTextSize(12);
+        tvDeletionPin.setTypeface(null, Typeface.BOLD);
+
+        chkAllowDeletions.setOnCheckedChangeListener((btn, isChecked) -> {
+            SyncService.isDeletionAllowed = isChecked;
+            if (isChecked) {
+                int randomPin = 100000 + new Random().nextInt(900000);
+                SyncService.activeDeletionPin = String.valueOf(randomPin);
+                tvDeletionPin.setText(" [PIN: " + SyncService.activeDeletionPin + "]");
+                tvDeletionPin.setTextColor(Color.parseColor("#4ADE80"));
+                Toast.makeText(this, "Remote deletions UNLOCKED. PIN: " + SyncService.activeDeletionPin, Toast.LENGTH_LONG).show();
+            } else {
+                SyncService.activeDeletionPin = "";
+                tvDeletionPin.setText(" [PIN: LOCKED]");
+                tvDeletionPin.setTextColor(Color.parseColor("#94A3B8"));
+                Toast.makeText(this, "Remote deletions BLOCKED.", Toast.LENGTH_SHORT).show();
+            }
+        });
+
+        deletionSecurityRow.addView(chkAllowDeletions);
+        deletionSecurityRow.addView(tvDeletionPin);
+
         LinearLayout btnRow = new LinearLayout(this);
         btnRow.setOrientation(LinearLayout.HORIZONTAL);
         btnRow.setPadding(0, 12, 0, 0);
@@ -255,6 +290,7 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
         btnRow.addView(btnVerifyAll);
 
         controlCard.addView(pcIpRow);
+        controlCard.addView(deletionSecurityRow);
         controlCard.addView(btnRow);
 
         if (insertIndex >= 0) {

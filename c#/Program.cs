@@ -8,12 +8,13 @@ namespace WiFiAutoStreamSync;
 internal static class Program
 {
     private const string AppName = "WiFiAutoStreamSync";
-    private const string MutexName = $@"Global\{AppName}_SingleInstance_Mutex";
+    private const string MutexName = $@"Local\{AppName}_SingleInstance_Mutex";
     private const string WindowMessageName = "WIFI_AUTO_STREAM_SYNC_ACTIVATE";
     private const string RunRegistryKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
     private static readonly uint WmActivateApp = RegisterWindowMessage(WindowMessageName);
     private static readonly IntPtr HwndBroadcast = new(0xffff);
+    private static readonly string LogFilePath = Path.Combine(AppContext.BaseDirectory, "startup_debug.log");
 
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern uint RegisterWindowMessage(string lpString);
@@ -32,50 +33,94 @@ internal static class Program
     private static Icon? _idleIcon;
     private static Icon? _syncingIcon;
 
+    public static void Log(string message)
+    {
+        try
+        {
+            string logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}";
+            Debug.WriteLine(logLine);
+            File.AppendAllText(LogFilePath, logLine + Environment.NewLine);
+        }
+        catch { }
+    }
+
     [STAThread]
     private static void Main()
     {
-        Directory.SetCurrentDirectory(AppContext.BaseDirectory);
-
-        _mutex = new Mutex(true, MutexName, out bool createdNew);
-        if (!createdNew)
+        try
         {
-            PostMessage(HwndBroadcast, WmActivateApp, IntPtr.Zero, IntPtr.Zero);
-            return;
+            Log("=== Application Main Started ===");
+            Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+
+            Log($"Checking single instance mutex: {MutexName}");
+            _mutex = new Mutex(true, MutexName, out bool createdNew);
+            if (!createdNew)
+            {
+                Log("Another instance is already running. Broadcasting activation message and exiting.");
+                PostMessage(HwndBroadcast, WmActivateApp, IntPtr.Zero, IntPtr.Zero);
+                return;
+            }
+
+            ApplicationConfiguration.Initialize();
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                Log($"CRITICAL UNHANDLED EXCEPTION: {e.ExceptionObject}");
+                MessageBox.Show($"Critical Unhandled Error:\n{e.ExceptionObject}", "WiFiAutoStreamSync Crash", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            };
+
+            Application.ThreadException += (s, e) =>
+            {
+                Log($"CRITICAL THREAD EXCEPTION: {e.Exception}");
+                MessageBox.Show($"Critical Thread Error:\n{e.Exception.Message}", "WiFiAutoStreamSync Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            };
+
+            Log("Ensuring firewall rule...");
+            EnsureFirewallRule();
+
+            Log("Creating dynamic tray icons...");
+            _idleIcon = TrayIconHelper.CreateDynamicIcon(syncing: false);
+            _syncingIcon = TrayIconHelper.CreateDynamicIcon(syncing: true);
+
+            Log("Loading configuration...");
+            _config = ConfigManager.Load();
+
+            Log("Starting SyncEngine...");
+            StartEngine();
+
+            Log("Initializing Tray icon & context menu...");
+            InitializeTray();
+
+            Log("Adding message filter for single instance activation...");
+            _messageFilter = new InstanceMessageFilter(WmActivateApp, ShowOrFocusBrowserWindow);
+            Application.AddMessageFilter(_messageFilter);
+
+            Log("Entering Application.Run()...");
+            Application.Run();
+
+            Log("Application.Run() exited. Releasing resources...");
+            _mutex.ReleaseMutex();
+            _idleIcon?.Dispose();
+            _syncingIcon?.Dispose();
+            Log("Application shutdown complete.");
         }
-
-        ApplicationConfiguration.Initialize();
-        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-        EnsureFirewallRule();
-
-        _idleIcon = TrayIconHelper.CreateDynamicIcon(syncing: false);
-        _syncingIcon = TrayIconHelper.CreateDynamicIcon(syncing: true);
-
-        _config = ConfigManager.Load();
-        StartEngine();
-        InitializeTray();
-
-        _messageFilter = new InstanceMessageFilter(WmActivateApp, ShowOrFocusBrowserWindow);
-        Application.AddMessageFilter(_messageFilter);
-
-        Application.Run();
-
-        _mutex.ReleaseMutex();
-        _idleIcon?.Dispose();
-        _syncingIcon?.Dispose();
+        catch (Exception ex)
+        {
+            Log($"FATAL EXCEPTION IN MAIN: {ex}");
+            MessageBox.Show($"Fatal startup error:\n{ex.Message}\n\nExhaustive debug log written to:\n{LogFilePath}", "WiFiAutoStreamSync Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private static void InitializeTray()
     {
         var menu = new ContextMenuStrip();
 
-        // Header status indicator
         var headerItem = new ToolStripMenuItem("Mirror Sync Engine") { Enabled = false };
         headerItem.Font = new Font("Segoe UI", 9f, FontStyle.Italic);
         menu.Items.Add(headerItem);
         menu.Items.Add(new ToolStripSeparator());
 
-        // Group 1: Device Explorer & Storage
         var browseItem = new ToolStripMenuItem("📂 Open Wireless Device Explorer...")
         {
             Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
@@ -85,13 +130,11 @@ internal static class Program
 
         menu.Items.Add(new ToolStripSeparator());
 
-        // Group 2: Synchronization & Manifest Diagnostics
         menu.Items.Add("⚡ Sync All Folders Now", null, (s, e) => _engine?.TriggerSync(null));
         menu.Items.Add("📋 View Live Manifest Dump...", null, (s, e) => ShowManifestInspector());
 
         menu.Items.Add(new ToolStripSeparator());
 
-        // Group 3: Pairing & Connectivity
         var discoveryItem = new ToolStripMenuItem("📡 Pairing Discovery (Auto-off in 5 min)")
         {
             Checked = _engine?.IsDiscoveryEnabled ?? true,
@@ -101,13 +144,11 @@ internal static class Program
         {
             if (_engine != null)
             {
-                // If toggled ON manually, set 5-minute auto-expiry to protect CPU
                 _engine.SetDiscoveryMode(discoveryItem.Checked, autoDisableMinutes: discoveryItem.Checked ? 5 : 0);
             }
         };
         menu.Items.Add(discoveryItem);
 
-        // Keep checkbox in sync when 5-minute timer expires automatically
         if (_engine != null)
         {
             _engine.OnDiscoveryStateChanged += enabled =>
@@ -125,7 +166,6 @@ internal static class Program
 
         menu.Items.Add(new ToolStripSeparator());
 
-        // Group 4: Settings & Lifecycle
         menu.Items.Add("⚙️ Manage Synced Folders...", null, (s, e) => ShowOrFocusConfigWindow());
 
         var startupItem = new ToolStripMenuItem("Run on Windows Startup") { Checked = IsStartupEnabled() };
@@ -152,7 +192,6 @@ internal static class Program
             Visible = true
         };
 
-        // Left single-click opens the wireless browser directly
         _trayIcon.MouseClick += (s, e) =>
         {
             if (e.Button == MouseButtons.Left)
@@ -162,18 +201,27 @@ internal static class Program
         };
     }
 
-
     private static void StartEngine()
     {
-        _engine = new SyncEngine(_config, (status, syncing) =>
+        try
         {
-            if (_trayIcon != null)
+            Log("StartEngine: Instantiating SyncEngine...");
+            _engine = new SyncEngine(_config, (status, syncing) =>
             {
-                _trayIcon.Text = $"Wi-Fi Sync | {(status.Length > 50 ? status[..47] + "..." : status)}";
-                _trayIcon.Icon = syncing ? _syncingIcon : _idleIcon;
-            }
-        });
-        _engine.Start();
+                if (_trayIcon != null)
+                {
+                    _trayIcon.Text = $"Wi-Fi Sync | {(status.Length > 50 ? status[..47] + "..." : status)}";
+                    _trayIcon.Icon = syncing ? _syncingIcon : _idleIcon;
+                }
+            });
+            _engine.Start();
+            Log("StartEngine: SyncEngine started successfully.");
+        }
+        catch (Exception ex)
+        {
+            Log($"StartEngine EXCEPTION: {ex}");
+            throw;
+        }
     }
 
     public static void ShowOrFocusBrowserWindow()
@@ -286,7 +334,10 @@ internal static class Program
             else
                 key.DeleteValue(AppName, false);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Log($"ToggleStartup EXCEPTION: {ex.Message}");
+        }
     }
 
     private static void EnsureFirewallRule()
@@ -299,8 +350,12 @@ internal static class Program
                 CreateNoWindow = true,
                 UseShellExecute = false
             });
+            Log("EnsureFirewallRule executed.");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Log($"EnsureFirewallRule EXCEPTION (non-fatal): {ex.Message}");
+        }
     }
 
     private sealed class InstanceMessageFilter(uint targetMessage, Action onMessageReceived) : IMessageFilter
@@ -316,10 +371,6 @@ internal static class Program
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Standard Configuration Window (Normal Windows Behavior & Native Pickers)
-// ---------------------------------------------------------------------------
 
 public sealed class ConfigWindow : Form
 {
@@ -337,6 +388,7 @@ public sealed class ConfigWindow : Form
         {
             Path = f.Path,
             Extensions = [.. f.Extensions],
+            IgnoredExtensions = [.. f.IgnoredExtensions],
             ScrubLevel = f.ScrubLevel
         }).ToList();
 
