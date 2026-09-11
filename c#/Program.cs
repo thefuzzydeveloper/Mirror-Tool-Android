@@ -28,7 +28,7 @@ internal static class Program
     private static AppConfig _config = new();
     private static ConfigWindow? _activeConfigWindow;
     private static DeviceBrowserWindow? _activeBrowserWindow;
-    private static InstanceMessageFilter? _messageFilter;
+    private static SingleInstanceReceiver? _instanceReceiver;
 
     private static Icon? _idleIcon;
     private static Icon? _syncingIcon;
@@ -66,14 +66,12 @@ internal static class Program
 
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
-                Log($"CRITICAL UNHANDLED EXCEPTION: {e.ExceptionObject}");
-                MessageBox.Show($"Critical Unhandled Error:\n{e.ExceptionObject}", "WiFiAutoStreamSync Crash", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Log($"UNHANDLED EXCEPTION (non-fatal): {e.ExceptionObject}");
             };
 
             Application.ThreadException += (s, e) =>
             {
-                Log($"CRITICAL THREAD EXCEPTION: {e.Exception}");
-                MessageBox.Show($"Critical Thread Error:\n{e.Exception.Message}", "WiFiAutoStreamSync Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Log($"THREAD EXCEPTION (non-fatal): {e.Exception.Message}");
             };
 
             Log("Ensuring firewall rule...");
@@ -86,20 +84,22 @@ internal static class Program
             Log("Loading configuration...");
             _config = ConfigManager.Load();
 
-            Log("Starting SyncEngine...");
-            StartEngine();
-
+            // INITIALIZE TRAY FIRST: Ensures tray visibility even if engine setup is delayed
             Log("Initializing Tray icon & context menu...");
             InitializeTray();
 
-            Log("Adding message filter for single instance activation...");
-            _messageFilter = new InstanceMessageFilter(WmActivateApp, ShowOrFocusBrowserWindow);
-            Application.AddMessageFilter(_messageFilter);
+            // Native receiver window ensures HWND_BROADCAST is caught when user launches a second instance
+            _instanceReceiver = new SingleInstanceReceiver(WmActivateApp, ShowOrFocusBrowserWindow);
+            _ = _instanceReceiver.Handle;
 
-            Log("Entering Application.Run()...");
+            Log("Starting SyncEngine...");
+            StartEngine();
+
+            Log("Entering Application.Run() (minimized in tray)...");
             Application.Run();
 
             Log("Application.Run() exited. Releasing resources...");
+            _instanceReceiver.Dispose();
             _mutex.ReleaseMutex();
             _idleIcon?.Dispose();
             _syncingIcon?.Dispose();
@@ -137,7 +137,7 @@ internal static class Program
 
         var discoveryItem = new ToolStripMenuItem("📡 Pairing Discovery (Auto-off in 5 min)")
         {
-            Checked = _engine?.IsDiscoveryEnabled ?? true,
+            Checked = _config.NetworkDiscoveryEnabled,
             CheckOnClick = true
         };
         discoveryItem.Click += (s, e) =>
@@ -148,21 +148,6 @@ internal static class Program
             }
         };
         menu.Items.Add(discoveryItem);
-
-        if (_engine != null)
-        {
-            _engine.OnDiscoveryStateChanged += enabled =>
-            {
-                if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true)
-                {
-                    _trayIcon.ContextMenuStrip.Invoke((Action)(() => discoveryItem.Checked = enabled));
-                }
-                else
-                {
-                    discoveryItem.Checked = enabled;
-                }
-            };
-        }
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -186,9 +171,9 @@ internal static class Program
 
         _trayIcon = new NotifyIcon
         {
-            Icon = _idleIcon,
+            Icon = _idleIcon ?? SystemIcons.Application,
             ContextMenuStrip = menu,
-            Text = "Wi-Fi Sync | Scanning for peers...",
+            Text = "Wi-Fi Sync | Initializing...",
             Visible = true
         };
 
@@ -199,6 +184,8 @@ internal static class Program
                 ShowOrFocusBrowserWindow();
             }
         };
+
+        _trayIcon.ShowBalloonTip(2000, "WiFiAutoStreamSync", "App is running minimized in system tray.", ToolTipIcon.Info);
     }
 
     private static void StartEngine()
@@ -210,17 +197,40 @@ internal static class Program
             {
                 if (_trayIcon != null)
                 {
-                    _trayIcon.Text = $"Wi-Fi Sync | {(status.Length > 50 ? status[..47] + "..." : status)}";
+                    string basePrefix = "Sync | ";
+                    int maxStatusLen = Math.Max(0, 63 - basePrefix.Length);
+                    string truncatedStatus = status.Length > maxStatusLen ? status[..(maxStatusLen - 3)] + "..." : status;
+
+                    _trayIcon.Text = $"{basePrefix}{truncatedStatus}";
                     _trayIcon.Icon = syncing ? _syncingIcon : _idleIcon;
                 }
             });
+
+            _engine.OnDiscoveryStateChanged += enabled =>
+            {
+                if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true)
+                {
+                    _trayIcon.ContextMenuStrip.Invoke((Action)(() =>
+                    {
+                        foreach (ToolStripItem item in _trayIcon.ContextMenuStrip.Items)
+                        {
+                            if (item is ToolStripMenuItem mi && mi.Text.StartsWith("📡"))
+                                mi.Checked = enabled;
+                        }
+                    }));
+                }
+            };
+
             _engine.Start();
             Log("StartEngine: SyncEngine started successfully.");
         }
         catch (Exception ex)
         {
             Log($"StartEngine EXCEPTION: {ex}");
-            throw;
+            if (_trayIcon != null)
+            {
+                _trayIcon.Text = "Wi-Fi Sync | Engine Warning";
+            }
         }
     }
 
@@ -358,16 +368,42 @@ internal static class Program
         }
     }
 
-    private sealed class InstanceMessageFilter(uint targetMessage, Action onMessageReceived) : IMessageFilter
+    private sealed class SingleInstanceReceiver : Form
     {
-        public bool PreFilterMessage(ref Message m)
+        private readonly uint _activateMsg;
+        private readonly Action _onActivate;
+
+        public SingleInstanceReceiver(uint activateMsg, Action onActivate)
         {
-            if (m.Msg == targetMessage)
+            _activateMsg = activateMsg;
+            _onActivate = onActivate;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            WindowState = FormWindowState.Minimized;
+            Size = new Size(0, 0);
+            Opacity = 0;
+        }
+
+        protected override void SetVisibleCore(bool value)
+        {
+            base.SetVisibleCore(false);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == _activateMsg)
             {
-                onMessageReceived();
-                return true;
+                Program.Log("SingleInstanceReceiver: Received activation signal. Activating window.");
+                if (InvokeRequired)
+                {
+                    Invoke(_onActivate);
+                }
+                else
+                {
+                    _onActivate();
+                }
             }
-            return false;
+            base.WndProc(ref m);
         }
     }
 }
@@ -379,6 +415,8 @@ public sealed class ConfigWindow : Form
     private readonly TextBox _ipBox;
     private readonly ListView _listView;
     private readonly List<FolderConfig> _foldersList;
+    private readonly Panel _warningPanel;
+    private readonly Label _warningLabel;
 
     public ConfigWindow(AppConfig config, Func<AppConfig, Task> onSaveCallback)
     {
@@ -393,12 +431,29 @@ public sealed class ConfigWindow : Form
         }).ToList();
 
         Text = "Auto Wi-Fi Mirror Folders Configuration";
-        Size = new Size(820, 520);
-        MinimumSize = new Size(720, 460);
+        Size = new Size(840, 560);
+        MinimumSize = new Size(740, 480);
         StartPosition = FormStartPosition.CenterScreen;
         TopMost = false;
         ShowInTaskbar = true;
         Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+
+        _warningPanel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 36,
+            BackColor = Color.FromArgb(254, 243, 199),
+            Padding = new Padding(12, 8, 12, 8),
+            Visible = false
+        };
+        _warningLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(146, 64, 14),
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        _warningPanel.Controls.Add(_warningLabel);
 
         var ipPanel = new Panel { Dock = DockStyle.Top, Height = 48, Padding = new Padding(12, 10, 12, 6) };
         var ipLabel = new Label { Text = "Target IP(s) (comma-separated, or blank for auto-discovery):", AutoSize = true, Dock = DockStyle.Left };
@@ -414,9 +469,9 @@ public sealed class ConfigWindow : Form
             MultiSelect = false,
             GridLines = true
         };
-        _listView.Columns.Add("Source Folder Path", 300);
-        _listView.Columns.Add("Matching Extensions", 140);
-        _listView.Columns.Add("Ignored Extensions", 140);
+        _listView.Columns.Add("Source Folder Path", 320);
+        _listView.Columns.Add("Matching Extensions", 130);
+        _listView.Columns.Add("Ignored Extensions", 130);
         _listView.Columns.Add("Scrub Level", 160);
 
         var actionPanel = new Panel { Dock = DockStyle.Bottom, Height = 45, Padding = new Padding(12, 6, 12, 6) };
@@ -474,6 +529,7 @@ public sealed class ConfigWindow : Form
         Controls.Add(_listView);
         Controls.Add(actionPanel);
         Controls.Add(ipPanel);
+        Controls.Add(_warningPanel);
         Controls.Add(footerPanel);
 
         RefreshList();
@@ -482,13 +538,33 @@ public sealed class ConfigWindow : Form
     private void RefreshList()
     {
         _listView.Items.Clear();
+        var missingPaths = new List<string>();
+
         foreach (var item in _foldersList)
         {
-            var lvi = new ListViewItem(item.Path);
+            bool exists = Directory.Exists(item.Path);
+            string displayPath = exists ? item.Path : $"⚠️ {item.Path} (Unreachable/Missing)";
+            if (!exists) missingPaths.Add(item.Path);
+
+            var lvi = new ListViewItem(displayPath);
+            if (!exists)
+            {
+                lvi.ForeColor = Color.FromArgb(180, 83, 9);
+            }
             lvi.SubItems.Add(string.Join(", ", item.Extensions));
             lvi.SubItems.Add(string.Join(", ", item.IgnoredExtensions));
             lvi.SubItems.Add(FormatScrubLabel(item.ScrubLevel));
             _listView.Items.Add(lvi);
+        }
+
+        if (missingPaths.Count > 0)
+        {
+            _warningLabel.Text = $"⚠️ Notice: {missingPaths.Count} folder(s) not found on disk (drive unmounted or missing). They are safely ignored.";
+            _warningPanel.Visible = true;
+        }
+        else
+        {
+            _warningPanel.Visible = false;
         }
     }
 
@@ -561,6 +637,18 @@ public sealed class ConfigWindow : Form
             {
                 MessageBox.Show(this, "The source directory path cannot be empty.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
+            }
+
+            if (!Directory.Exists(chosenPath))
+            {
+                var warnRes = MessageBox.Show(dlg,
+                    $"The folder '{chosenPath}' does not currently exist or its drive is disconnected.\n\nDo you want to save it anyway? The app will safely ignore it until it becomes available.",
+                    "Unreachable Path Warning",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+
+                if (warnRes != DialogResult.Yes)
+                    return;
             }
 
             var parts = extBox.Text.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);

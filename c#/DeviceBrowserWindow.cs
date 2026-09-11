@@ -9,6 +9,7 @@ public sealed class DeviceBrowserWindow : Form
     private readonly TextBox _pathBox;
     private readonly ListView _fileListView;
     private readonly ToolStripStatusLabel _statusLabel;
+    private readonly ToolStripStatusLabel _speedLabel;
     private readonly ToolStripProgressBar _progressBar;
     private readonly ImageList _iconsList;
 
@@ -20,8 +21,8 @@ public sealed class DeviceBrowserWindow : Form
         _engine = engine;
 
         Text = "Android Wireless Device & Storage Explorer";
-        Size = new Size(1060, 680);
-        MinimumSize = new Size(860, 520);
+        Size = new Size(1160, 680);
+        MinimumSize = new Size(920, 520);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9.5f);
         TopMost = false;
@@ -59,16 +60,19 @@ public sealed class DeviceBrowserWindow : Form
             }
         };
 
-        var btnSaveCurrentFolder = new Button { Text = "💾 Save Folder to PC...", Width = 170, Dock = DockStyle.Right, BackColor = Color.FromArgb(16, 185, 129), ForeColor = Color.White };
+        var btnSaveFile = new Button { Text = "💾 Save File to PC...", Width = 150, Dock = DockStyle.Right, BackColor = Color.FromArgb(2, 132, 199), ForeColor = Color.White };
+        btnSaveFile.Click += async (s, e) => await SaveSelectedFileToFolderAsync();
+
+        var btnSaveCurrentFolder = new Button { Text = "📁 Save Folder to PC...", Width = 160, Dock = DockStyle.Right, BackColor = Color.FromArgb(16, 185, 129), ForeColor = Color.White };
         btnSaveCurrentFolder.Click += async (s, e) => await SaveCurrentFolderToPcAsync();
 
-        var btnUpload = new Button { Text = "⬆ Upload File...", Width = 120, Dock = DockStyle.Right, BackColor = Color.FromArgb(2, 132, 199), ForeColor = Color.White };
+        var btnUpload = new Button { Text = "⬆ Upload File...", Width = 115, Dock = DockStyle.Right, BackColor = Color.FromArgb(14, 165, 233), ForeColor = Color.White };
         btnUpload.Click += async (s, e) => await UploadFileAsync();
 
-        var btnUploadFolder = new Button { Text = "📁 Upload Folder...", Width = 135, Dock = DockStyle.Right };
+        var btnUploadFolder = new Button { Text = "📁 Upload Folder...", Width = 130, Dock = DockStyle.Right };
         btnUploadFolder.Click += async (s, e) => await UploadFolderAsync();
 
-        var btnInspectManifest = new Button { Text = "📋 Manifest", Width = 100, Dock = DockStyle.Right };
+        var btnInspectManifest = new Button { Text = "📋 Manifest", Width = 95, Dock = DockStyle.Right };
         btnInspectManifest.Click += (s, e) => Program.ShowManifestInspector();
 
         var navMiddle = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 0, 8, 0) };
@@ -77,6 +81,7 @@ public sealed class DeviceBrowserWindow : Form
         navPanel.Controls.Add(navMiddle);
         navPanel.Controls.Add(btnRefresh);
         navPanel.Controls.Add(btnUp);
+        navPanel.Controls.Add(btnSaveFile);
         navPanel.Controls.Add(btnSaveCurrentFolder);
         navPanel.Controls.Add(btnUploadFolder);
         navPanel.Controls.Add(btnUpload);
@@ -112,7 +117,8 @@ public sealed class DeviceBrowserWindow : Form
         };
 
         var ctxMenu = new ContextMenuStrip();
-        ctxMenu.Items.Add("💾 Save File to Specific PC Location...", null, async (s, e) => await SaveSelectedFileToLocationAsync());
+        ctxMenu.Items.Add("💾 Save File to Folder / Directory...", null, async (s, e) => await SaveSelectedFileToFolderAsync());
+        ctxMenu.Items.Add("💾 Save File As (Specific Name/Location)...", null, async (s, e) => await SaveSelectedFileToLocationAsync());
         ctxMenu.Items.Add("📁 Save Selected Folder to PC Location...", null, async (s, e) => await SaveSelectedFolderToLocationAsync());
         ctxMenu.Items.Add(new ToolStripSeparator());
         ctxMenu.Items.Add("👁 Open / Preview", null, async (s, e) =>
@@ -128,8 +134,18 @@ public sealed class DeviceBrowserWindow : Form
 
         var statusStrip = new StatusStrip();
         _statusLabel = new ToolStripStatusLabel { Text = "Ready", Spring = true, TextAlign = ContentAlignment.MiddleLeft };
-        _progressBar = new ToolStripProgressBar { Width = 160, Visible = false };
+        _speedLabel = new ToolStripStatusLabel { Text = string.Empty, AutoSize = true, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+        _progressBar = new ToolStripProgressBar
+        {
+            Width = 220,
+            Visible = false,
+            Style = ProgressBarStyle.Continuous,
+            Minimum = 0,
+            Maximum = 100
+        };
+
         statusStrip.Items.Add(_statusLabel);
+        statusStrip.Items.Add(_speedLabel);
         statusStrip.Items.Add(_progressBar);
 
         Controls.Add(_fileListView);
@@ -278,9 +294,42 @@ public sealed class DeviceBrowserWindow : Form
         await LoadDirectoryAsync(parent);
     }
 
+    private async Task SaveSelectedFileToFolderAsync()
+    {
+        if (_currentClient == null || _fileListView.SelectedItems.Count == 0)
+        {
+            MessageBox.Show(this, "Please select a file from the list first.", "No File Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (_fileListView.SelectedItems[0].Tag is not AndroidFileItem item || item.IsDir)
+        {
+            MessageBox.Show(this, "The selected item is a directory. Use 'Save Folder to PC...' instead.", "Selection Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var fbd = new FolderBrowserDialog
+        {
+            Description = $"Select directory on any disk/drive to save '{item.Name}' directly:",
+            UseDescriptionForTitle = true,
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+        };
+
+        if (fbd.ShowDialog(this) == DialogResult.OK)
+        {
+            string destinationFile = Path.Combine(fbd.SelectedPath, item.Name);
+            await ExecuteDirectFileDownloadAsync(item, destinationFile);
+        }
+    }
+
     private async Task SaveSelectedFileToLocationAsync()
     {
-        if (_currentClient == null || _fileListView.SelectedItems.Count == 0) return;
+        if (_currentClient == null || _fileListView.SelectedItems.Count == 0)
+        {
+            MessageBox.Show(this, "Please select a file from the list first.", "No File Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         if (_fileListView.SelectedItems[0].Tag is not AndroidFileItem item || item.IsDir)
         {
             MessageBox.Show(this, "Please select a file to save.", "Selection", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -289,7 +338,7 @@ public sealed class DeviceBrowserWindow : Form
 
         using var sfd = new SaveFileDialog
         {
-            Title = $"Save '{item.Name}' to Windows PC",
+            Title = $"Save '{item.Name}' directly to chosen location",
             FileName = item.Name,
             Filter = "All Files (*.*)|*.*",
             InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
@@ -297,24 +346,69 @@ public sealed class DeviceBrowserWindow : Form
 
         if (sfd.ShowDialog(this) == DialogResult.OK)
         {
-            _progressBar.Visible = true;
-            _progressBar.Style = ProgressBarStyle.Marquee;
-            _statusLabel.Text = $"Downloading {item.Name} to PC...";
-
-            bool ok = await _currentClient.PullFileAsync(item.Path, sfd.FileName);
-            _progressBar.Visible = false;
-
-            if (ok)
-            {
-                _statusLabel.Text = $"Saved {item.Name} successfully.";
-                MessageBox.Show(this, $"File successfully saved to:\n{sfd.FileName}", "Saved Successfully", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            else
-            {
-                _statusLabel.Text = "File download failed.";
-                MessageBox.Show(this, "Unable to pull file from Android. Please check connection.", "Transfer Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            await ExecuteDirectFileDownloadAsync(item, sfd.FileName);
         }
+    }
+
+    private async Task ExecuteDirectFileDownloadAsync(AndroidFileItem item, string destinationFile)
+    {
+        if (_currentClient == null || !_currentClient.IsConnected)
+        {
+            MessageBox.Show(this, "Device is disconnected.", "Connection Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        _progressBar.Visible = true;
+        _progressBar.Style = ProgressBarStyle.Continuous;
+        _progressBar.Minimum = 0;
+        _progressBar.Maximum = 100;
+        _progressBar.Value = 0;
+        _speedLabel.Text = "⚡ Starting...";
+        _statusLabel.Text = $"Saving '{item.Name}' directly to {destinationFile}...";
+
+        var sw = Stopwatch.StartNew();
+        var progress = new Progress<FileTransferProgress>(p =>
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+
+            _progressBar.Value = Math.Clamp((int)p.Percentage, 0, 100);
+            _statusLabel.Text = $"Downloading: {item.Name} ({FormatBytes(p.BytesTransferred)} / {FormatBytes(p.TotalBytes)} - {p.Percentage:0.0}%)";
+
+            string etaStr = p.EstimatedTimeRemaining.HasValue
+                ? $"ETA: {p.EstimatedTimeRemaining.Value:mm\\:ss}"
+                : "ETA: --";
+            _speedLabel.Text = $"⚡ {FormatSpeed(p.BytesPerSecond)} | {etaStr}";
+        });
+
+        bool ok = await _currentClient.PullFileAsync(item.Path, destinationFile, progress);
+
+        sw.Stop();
+        _progressBar.Value = ok ? 100 : 0;
+
+        if (ok)
+        {
+            double totalSec = sw.Elapsed.TotalSeconds;
+            double avgSpeed = totalSec > 0 ? item.Size / totalSec : 0;
+            _statusLabel.Text = $"Saved '{item.Name}' successfully.";
+            _speedLabel.Text = $"✓ {FormatSpeed(avgSpeed)} avg";
+
+            MessageBox.Show(
+                this,
+                $"File successfully saved directly to:\n{destinationFile}\n\nSize: {FormatBytes(item.Size)}\nDuration: {totalSec:0.1}s\nAverage Speed: {FormatSpeed(avgSpeed)}",
+                "Saved Successfully",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information
+            );
+        }
+        else
+        {
+            _statusLabel.Text = "File download failed.";
+            _speedLabel.Text = "❌ Failed";
+            MessageBox.Show(this, "Unable to pull file from Android. Please check connection.", "Transfer Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        _progressBar.Visible = false;
+        _speedLabel.Text = string.Empty;
     }
 
     private async Task SaveSelectedFolderToLocationAsync()
@@ -341,7 +435,7 @@ public sealed class DeviceBrowserWindow : Form
     {
         using var fbd = new FolderBrowserDialog
         {
-            Description = $"Select Windows destination folder to save '{defaultFolderName}'",
+            Description = $"Select Windows destination directory to save '{defaultFolderName}'",
             UseDescriptionForTitle = true,
             InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
         };
@@ -351,20 +445,35 @@ public sealed class DeviceBrowserWindow : Form
             string finalTarget = Path.Combine(fbd.SelectedPath, defaultFolderName);
 
             _progressBar.Visible = true;
-            _progressBar.Style = ProgressBarStyle.Marquee;
+            _progressBar.Style = ProgressBarStyle.Continuous;
+            _progressBar.Minimum = 0;
+            _progressBar.Maximum = 100;
+            _progressBar.Value = 0;
+
+            var progress = new Progress<FileTransferProgress>(p =>
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                _progressBar.Value = Math.Clamp((int)p.Percentage, 0, 100);
+                string etaStr = p.EstimatedTimeRemaining.HasValue
+                    ? $"ETA: {p.EstimatedTimeRemaining.Value:mm\\:ss}"
+                    : "--";
+                _speedLabel.Text = $"⚡ {FormatSpeed(p.BytesPerSecond)} | {etaStr}";
+            });
 
             int downloadedCount = await _currentClient!.PullFolderRecursiveAsync(
                 androidFolderPath,
                 finalTarget,
-                msg => { Invoke((Action)(() => _statusLabel.Text = msg)); }
+                msg => { Invoke((Action)(() => _statusLabel.Text = msg)); },
+                progress
             );
 
             _progressBar.Visible = false;
+            _speedLabel.Text = string.Empty;
             _statusLabel.Text = $"Folder transfer completed ({downloadedCount} files saved).";
 
             MessageBox.Show(
                 this,
-                $"Folder successfully downloaded!\nTotal files saved: {downloadedCount}\nSaved to: {finalTarget}",
+                $"Folder successfully downloaded!\nTotal files saved: {downloadedCount}\nSaved directly to: {finalTarget}",
                 "Folder Download Complete",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
@@ -377,8 +486,25 @@ public sealed class DeviceBrowserWindow : Form
         if (_currentClient == null) return;
         string tempPath = Path.Combine(Path.GetTempPath(), "MirrorSync_" + item.Name);
 
-        _statusLabel.Text = $"Fetching {item.Name}...";
-        bool ok = await _currentClient.PullFileAsync(item.Path, tempPath);
+        _statusLabel.Text = $"Fetching {item.Name} for preview...";
+        _progressBar.Visible = true;
+        _progressBar.Style = ProgressBarStyle.Continuous;
+        _progressBar.Minimum = 0;
+        _progressBar.Maximum = 100;
+        _progressBar.Value = 0;
+
+        var progress = new Progress<FileTransferProgress>(p =>
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            _progressBar.Value = Math.Clamp((int)p.Percentage, 0, 100);
+            _statusLabel.Text = $"Previewing: {item.Name} ({FormatBytes(p.BytesTransferred)} / {FormatBytes(p.TotalBytes)} - {p.Percentage:0.0}%)";
+            _speedLabel.Text = $"⚡ {FormatSpeed(p.BytesPerSecond)}";
+        });
+
+        bool ok = await _currentClient.PullFileAsync(item.Path, tempPath, progress);
+        _progressBar.Visible = false;
+        _speedLabel.Text = string.Empty;
+
         if (ok)
         {
             _statusLabel.Text = $"Opened {item.Name}";
@@ -402,14 +528,29 @@ public sealed class DeviceBrowserWindow : Form
 
         if (ofd.ShowDialog(this) == DialogResult.OK)
         {
-            string dest = $"{_currentPath.TrimEnd('/')}/{Path.GetFileName(ofd.FileName)}";
-            _statusLabel.Text = $"Uploading {Path.GetFileName(ofd.FileName)}...";
-            _progressBar.Visible = true;
-            _progressBar.Style = ProgressBarStyle.Marquee;
+            string fileName = Path.GetFileName(ofd.FileName);
+            string dest = $"{_currentPath.TrimEnd('/')}/{fileName}";
 
-            bool ok = await _currentClient.PushFileDirectAsync(ofd.FileName, dest);
+            _statusLabel.Text = $"Uploading {fileName}...";
+            _progressBar.Visible = true;
+            _progressBar.Style = ProgressBarStyle.Continuous;
+            _progressBar.Minimum = 0;
+            _progressBar.Maximum = 100;
+            _progressBar.Value = 0;
+
+            var progress = new Progress<FileTransferProgress>(p =>
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                _progressBar.Value = Math.Clamp((int)p.Percentage, 0, 100);
+                _statusLabel.Text = $"Uploading: {fileName} ({FormatBytes(p.BytesTransferred)} / {FormatBytes(p.TotalBytes)} - {p.Percentage:0.0}%)";
+                string etaStr = p.EstimatedTimeRemaining.HasValue ? $"ETA: {p.EstimatedTimeRemaining.Value:mm\\:ss}" : "--";
+                _speedLabel.Text = $"⚡ {FormatSpeed(p.BytesPerSecond)} | {etaStr}";
+            });
+
+            bool ok = await _currentClient.PushFileDirectAsync(ofd.FileName, dest, progress);
             _progressBar.Visible = false;
-            _statusLabel.Text = ok ? "Upload completed." : "Upload failed.";
+            _speedLabel.Text = string.Empty;
+            _statusLabel.Text = ok ? $"Uploaded '{fileName}' successfully." : "Upload failed.";
             await LoadDirectoryAsync(_currentPath);
         }
     }
@@ -483,12 +624,26 @@ public sealed class DeviceBrowserWindow : Form
         string[] suffixes = ["B", "KB", "MB", "GB", "TB"];
         int counter = 0;
         decimal number = bytes;
-        while (Math.Round(number / 1024) >= 1)
+        while (Math.Round(number / 1024) >= 1 && counter < suffixes.Length - 1)
         {
             number /= 1024;
             counter++;
         }
         return $"{number:n1} {suffixes[counter]}";
+    }
+
+    private static string FormatSpeed(double bytesPerSecond)
+    {
+        if (bytesPerSecond <= 0) return "0.0 B/s";
+        string[] suffixes = ["B/s", "KB/s", "MB/s", "GB/s"];
+        int counter = 0;
+        double speed = bytesPerSecond;
+        while (speed >= 1024.0 && counter < suffixes.Length - 1)
+        {
+            speed /= 1024.0;
+            counter++;
+        }
+        return $"{speed:0.1} {suffixes[counter]}";
     }
 
     private sealed record DeviceComboItem(DeviceClient Client, string Display)

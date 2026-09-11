@@ -99,7 +99,10 @@ public sealed class SyncEngine : IAsyncDisposable
             try
             {
                 if (!Directory.Exists(folder.Path))
-                    Directory.CreateDirectory(folder.Path);
+                {
+                    Program.Log($"SetupFileSystemWatchers [Warning]: Folder '{folder.Path}' does not exist or drive is disconnected. Skipping watcher.");
+                    continue;
+                }
 
                 var fsw = new FileSystemWatcher(folder.Path)
                 {
@@ -117,7 +120,7 @@ public sealed class SyncEngine : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Program.Log($"SetupFileSystemWatchers EXCEPTION for folder '{folder.Path}': {ex.Message}");
+                Program.Log($"SetupFileSystemWatchers [Warning] for folder '{folder.Path}': {ex.Message}");
             }
         }
     }
@@ -166,7 +169,11 @@ public sealed class SyncEngine : IAsyncDisposable
             if (clients.Count == 0) return;
 
             string folderPath = Path.GetFullPath(folder.Path);
-            if (!Directory.Exists(folderPath)) return;
+            if (!Directory.Exists(folderPath))
+            {
+                Program.Log($"ExecuteFolderSyncAcrossAllDevicesAsync [Warning]: Folder '{folderPath}' not found or unreachable. Skipping.");
+                return;
+            }
 
             string folderId = ConfigManager.ComputeFolderId(folderPath);
 
@@ -331,48 +338,59 @@ public sealed class SyncEngine : IAsyncDisposable
         {
             foreach (var folder in _config.WindowsFolders)
             {
-                string folderPath = Path.GetFullPath(folder.Path);
-                if (!Directory.Exists(folderPath)) Directory.CreateDirectory(folderPath);
-
-                string folderId = ConfigManager.ComputeFolderId(folderPath);
-                var winManifest = new Dictionary<string, long>();
-                var targetToLocal = new Dictionary<string, string>();
-
-                foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
+                try
                 {
-                    if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
-
-                    string rel = Path.GetRelativePath(folderPath, file).Replace('\\', '/').TrimStart('/');
-                    string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
-
-                    try
+                    string folderPath = Path.GetFullPath(folder.Path);
+                    if (!Directory.Exists(folderPath))
                     {
-                        winManifest[targetRel] = new FileInfo(file).Length;
-                        targetToLocal[targetRel] = file;
+                        Program.Log($"SyncFullDeviceAuditAsync [Warning]: Directory '{folderPath}' not found or drive disconnected. Ignoring folder.");
+                        continue;
                     }
-                    catch { }
+
+                    string folderId = ConfigManager.ComputeFolderId(folderPath);
+                    var winManifest = new Dictionary<string, long>();
+                    var targetToLocal = new Dictionary<string, string>();
+
+                    foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
+                    {
+                        if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
+
+                        string rel = Path.GetRelativePath(folderPath, file).Replace('\\', '/').TrimStart('/');
+                        string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
+
+                        try
+                        {
+                            winManifest[targetRel] = new FileInfo(file).Length;
+                            targetToLocal[targetRel] = file;
+                        }
+                        catch { }
+                    }
+
+                    var report = await client.ExchangeManifestAsync(folderId, winManifest, ct);
+                    if (report == null) continue;
+
+                    foreach (var targetPosix in report.Needed)
+                    {
+                        if (ct.IsCancellationRequested || !client.IsConnected) break;
+                        string cleanKey = targetPosix.TrimStart('/');
+
+                        string? localFile = null;
+                        if (!targetToLocal.TryGetValue(cleanKey, out localFile))
+                        {
+                            var match = targetToLocal.FirstOrDefault(kvp => kvp.Key.Equals(cleanKey, StringComparison.OrdinalIgnoreCase));
+                            localFile = match.Value;
+                        }
+
+                        if (localFile != null && File.Exists(localFile))
+                        {
+                            _statusCallback($"Syncing: {Path.GetFileName(localFile)}", true);
+                            await client.StreamFileAsync(folderId, localFile, cleanKey, ct);
+                        }
+                    }
                 }
-
-                var report = await client.ExchangeManifestAsync(folderId, winManifest, ct);
-                if (report == null) continue;
-
-                foreach (var targetPosix in report.Needed)
+                catch (Exception folderEx)
                 {
-                    if (ct.IsCancellationRequested || !client.IsConnected) break;
-                    string cleanKey = targetPosix.TrimStart('/');
-
-                    string? localFile = null;
-                    if (!targetToLocal.TryGetValue(cleanKey, out localFile))
-                    {
-                        var match = targetToLocal.FirstOrDefault(kvp => kvp.Key.Equals(cleanKey, StringComparison.OrdinalIgnoreCase));
-                        localFile = match.Value;
-                    }
-
-                    if (localFile != null && File.Exists(localFile))
-                    {
-                        _statusCallback($"Syncing: {Path.GetFileName(localFile)}", true);
-                        await client.StreamFileAsync(folderId, localFile, cleanKey, ct);
-                    }
+                    Program.Log($"SyncFullDeviceAuditAsync [Warning] for folder '{folder.Path}': {folderEx.Message}. Skipping.");
                 }
             }
 
@@ -504,14 +522,26 @@ public sealed class SyncEngine : IAsyncDisposable
             var manifest = new Dictionary<string, long>();
             if (Directory.Exists(full))
             {
-                foreach (var file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
+                try
                 {
-                    if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
-                    string rel = Path.GetRelativePath(full, file).Replace('\\', '/').TrimStart('/');
-                    string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
-                    manifest[targetRel] = new FileInfo(file).Length;
+                    foreach (var file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
+                    {
+                        if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
+                        string rel = Path.GetRelativePath(full, file).Replace('\\', '/').TrimStart('/');
+                        string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
+                        manifest[targetRel] = new FileInfo(file).Length;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"GetManifestsPayload [Warning] for folder '{full}': {ex.Message}");
                 }
             }
+            else
+            {
+                Program.Log($"GetManifestsPayload: Folder '{full}' does not exist. Omitting files.");
+            }
+
             foldersData.Add(new
             {
                 id = ConfigManager.ComputeFolderId(full),

@@ -1,10 +1,20 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
 namespace WiFiAutoStreamSync;
+
+public sealed class FileTransferProgress
+{
+    public long BytesTransferred { get; init; }
+    public long TotalBytes { get; init; }
+    public double BytesPerSecond { get; init; }
+    public TimeSpan? EstimatedTimeRemaining { get; init; }
+    public double Percentage => TotalBytes > 0 ? Math.Clamp((double)BytesTransferred / TotalBytes * 100.0, 0.0, 100.0) : 0.0;
+}
 
 public sealed class DeviceClient : IAsyncDisposable
 {
@@ -154,10 +164,13 @@ public sealed class DeviceClient : IAsyncDisposable
         }
     }
 
-    public async Task<bool> PullFileAsync(string androidFilePath, string localDestinationPath, IProgress<long>? progress = null, CancellationToken ct = default)
+    public async Task<bool> PullFileAsync(
+        string androidFilePath,
+        string localDestinationPath,
+        IProgress<FileTransferProgress>? progress = null,
+        CancellationToken ct = default)
     {
         await _networkLock.WaitAsync(ct);
-        string tempPath = localDestinationPath + ".tmp_" + Guid.NewGuid().ToString("N")[..8];
         try
         {
             if (_stream == null) return false;
@@ -179,17 +192,40 @@ public sealed class DeviceClient : IAsyncDisposable
             await Protocol.ReadExactAsync(_stream, sizeBytes, ct);
             long fileSize = BinaryPrimitives.ReadInt64BigEndian(sizeBytes);
 
+            // DIRECT DISK WRITE: Ensure destination directory exists on target disk
             string? dir = Path.GetDirectoryName(localDestinationPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
                 Directory.CreateDirectory(dir);
+            }
 
             byte[] chunkBuffer = ArrayPool<byte>.Shared.Rent(Protocol.ChunkStreamSize);
+            var sw = Stopwatch.StartNew();
+            long lastReportMs = 0;
+            long lastReportBytes = 0;
+            double currentSpeed = 0;
+
             try
             {
-                await using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true))
+                // Write directly to destination path without intermediate files on C:
+                await using (var fs = new FileStream(
+                    localDestinationPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 128 * 1024,
+                    useAsync: true))
                 {
                     long bytesRemaining = fileSize;
                     long totalDownloaded = 0;
+
+                    progress?.Report(new FileTransferProgress
+                    {
+                        BytesTransferred = 0,
+                        TotalBytes = fileSize,
+                        BytesPerSecond = 0,
+                        EstimatedTimeRemaining = null
+                    });
 
                     while (bytesRemaining > 0)
                     {
@@ -200,12 +236,48 @@ public sealed class DeviceClient : IAsyncDisposable
                         await fs.WriteAsync(chunkBuffer.AsMemory(0, read), ct);
                         bytesRemaining -= read;
                         totalDownloaded += read;
-                        progress?.Report(totalDownloaded);
+
+                        long elapsedMs = sw.ElapsedMilliseconds;
+                        bool isFinished = bytesRemaining == 0;
+
+                        if (progress != null && (isFinished || elapsedMs - lastReportMs >= 80))
+                        {
+                            long deltaMs = elapsedMs - lastReportMs;
+                            long deltaBytes = totalDownloaded - lastReportBytes;
+                            if (deltaMs > 0)
+                            {
+                                double instantSpeed = (deltaBytes * 1000.0) / deltaMs;
+                                currentSpeed = currentSpeed <= 0 ? instantSpeed : (currentSpeed * 0.7) + (instantSpeed * 0.3);
+                            }
+                            else if (elapsedMs > 0)
+                            {
+                                currentSpeed = (totalDownloaded * 1000.0) / elapsedMs;
+                            }
+
+                            TimeSpan? eta = null;
+                            if (currentSpeed > 0 && fileSize > totalDownloaded)
+                            {
+                                double remainingSec = (fileSize - totalDownloaded) / currentSpeed;
+                                if (remainingSec >= 0 && remainingSec < 86400)
+                                    eta = TimeSpan.FromSeconds(remainingSec);
+                            }
+
+                            progress.Report(new FileTransferProgress
+                            {
+                                BytesTransferred = totalDownloaded,
+                                TotalBytes = fileSize,
+                                BytesPerSecond = currentSpeed,
+                                EstimatedTimeRemaining = eta
+                            });
+
+                            lastReportMs = elapsedMs;
+                            lastReportBytes = totalDownloaded;
+                        }
                     }
+
+                    await fs.FlushAsync(ct);
                 }
 
-                if (File.Exists(localDestinationPath)) File.Delete(localDestinationPath);
-                File.Move(tempPath, localDestinationPath);
                 return true;
             }
             finally
@@ -216,7 +288,12 @@ public sealed class DeviceClient : IAsyncDisposable
         catch (Exception ex)
         {
             Program.Log($"DeviceClient.PullFileAsync EXCEPTION: {ex.Message}");
-            if (File.Exists(tempPath)) File.Delete(tempPath);
+            try
+            {
+                if (File.Exists(localDestinationPath))
+                    File.Delete(localDestinationPath);
+            }
+            catch { }
             DisconnectInternal();
             return false;
         }
@@ -226,7 +303,12 @@ public sealed class DeviceClient : IAsyncDisposable
         }
     }
 
-    public async Task<int> PullFolderRecursiveAsync(string androidFolderPath, string localDestinationDir, Action<string>? statusCallback = null, CancellationToken ct = default)
+    public async Task<int> PullFolderRecursiveAsync(
+        string androidFolderPath,
+        string localDestinationDir,
+        Action<string>? statusCallback = null,
+        IProgress<FileTransferProgress>? progress = null,
+        CancellationToken ct = default)
     {
         int filesDownloaded = 0;
         if (!Directory.Exists(localDestinationDir))
@@ -242,13 +324,13 @@ public sealed class DeviceClient : IAsyncDisposable
             if (item.IsDir)
             {
                 string nextLocal = Path.Combine(localDestinationDir, item.Name);
-                filesDownloaded += await PullFolderRecursiveAsync(item.Path, nextLocal, statusCallback, ct);
+                filesDownloaded += await PullFolderRecursiveAsync(item.Path, nextLocal, statusCallback, progress, ct);
             }
             else
             {
                 string targetLocalFile = Path.Combine(localDestinationDir, item.Name);
-                statusCallback?.Invoke($"Downloading {item.Name} ({item.Size / 1024} KB)...");
-                bool ok = await PullFileAsync(item.Path, targetLocalFile, null, ct);
+                statusCallback?.Invoke($"Downloading {item.Name} ({FormatBytes(item.Size)})...");
+                bool ok = await PullFileAsync(item.Path, targetLocalFile, progress, ct);
                 if (ok) filesDownloaded++;
             }
         }
@@ -256,7 +338,11 @@ public sealed class DeviceClient : IAsyncDisposable
         return filesDownloaded;
     }
 
-    public async Task<bool> PushFileDirectAsync(string localFilePath, string androidDestinationPath, CancellationToken ct = default)
+    public async Task<bool> PushFileDirectAsync(
+        string localFilePath,
+        string androidDestinationPath,
+        IProgress<FileTransferProgress>? progress = null,
+        CancellationToken ct = default)
     {
         await _networkLock.WaitAsync(ct);
         try
@@ -280,16 +366,70 @@ public sealed class DeviceClient : IAsyncDisposable
             await Protocol.SendExactAsync(_stream, header, ct);
 
             byte[] chunk = ArrayPool<byte>.Shared.Rent(Protocol.ChunkStreamSize);
+            var sw = Stopwatch.StartNew();
+            long lastReportMs = 0;
+            long lastReportBytes = 0;
+            double currentSpeed = 0;
+
             try
             {
                 long remaining = fileSize;
+                long totalUploaded = 0;
+
+                progress?.Report(new FileTransferProgress
+                {
+                    BytesTransferred = 0,
+                    TotalBytes = fileSize,
+                    BytesPerSecond = 0,
+                    EstimatedTimeRemaining = null
+                });
+
                 while (remaining > 0)
                 {
                     int toRead = (int)Math.Min(remaining, Protocol.ChunkStreamSize);
                     int read = await fs.ReadAsync(chunk.AsMemory(0, toRead), ct);
                     if (read == 0) break;
+
                     await Protocol.SendExactAsync(_stream, chunk.AsMemory(0, read), ct);
                     remaining -= read;
+                    totalUploaded += read;
+
+                    long elapsedMs = sw.ElapsedMilliseconds;
+                    bool isFinished = remaining == 0;
+
+                    if (progress != null && (isFinished || elapsedMs - lastReportMs >= 80))
+                    {
+                        long deltaMs = elapsedMs - lastReportMs;
+                        long deltaBytes = totalUploaded - lastReportBytes;
+                        if (deltaMs > 0)
+                        {
+                            double instantSpeed = (deltaBytes * 1000.0) / deltaMs;
+                            currentSpeed = currentSpeed <= 0 ? instantSpeed : (currentSpeed * 0.7) + (instantSpeed * 0.3);
+                        }
+                        else if (elapsedMs > 0)
+                        {
+                            currentSpeed = (totalUploaded * 1000.0) / elapsedMs;
+                        }
+
+                        TimeSpan? eta = null;
+                        if (currentSpeed > 0 && fileSize > totalUploaded)
+                        {
+                            double remainingSec = (fileSize - totalUploaded) / currentSpeed;
+                            if (remainingSec >= 0 && remainingSec < 86400)
+                                eta = TimeSpan.FromSeconds(remainingSec);
+                        }
+
+                        progress.Report(new FileTransferProgress
+                        {
+                            BytesTransferred = totalUploaded,
+                            TotalBytes = fileSize,
+                            BytesPerSecond = currentSpeed,
+                            EstimatedTimeRemaining = eta
+                        });
+
+                        lastReportMs = elapsedMs;
+                        lastReportBytes = totalUploaded;
+                    }
                 }
             }
             finally
@@ -322,7 +462,7 @@ public sealed class DeviceClient : IAsyncDisposable
             string fileName = Path.GetFileName(file);
             string destPath = $"{androidDestinationFolder.TrimEnd('/')}/{fileName}";
             statusCallback?.Invoke($"Uploading: {fileName}...");
-            if (await PushFileDirectAsync(file, destPath, ct))
+            if (await PushFileDirectAsync(file, destPath, null, ct))
                 filesUploaded++;
         }
 
@@ -668,6 +808,19 @@ public sealed class DeviceClient : IAsyncDisposable
             }
         }
         return null;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] suffixes = ["B", "KB", "MB", "GB", "TB"];
+        int counter = 0;
+        decimal number = bytes;
+        while (Math.Round(number / 1024) >= 1 && counter < suffixes.Length - 1)
+        {
+            number /= 1024;
+            counter++;
+        }
+        return $"{number:n1} {suffixes[counter]}";
     }
 
     private void DisconnectInternal()
