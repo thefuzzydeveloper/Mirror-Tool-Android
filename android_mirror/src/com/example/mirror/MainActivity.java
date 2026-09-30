@@ -143,9 +143,7 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
         File configFile = new File(getFilesDir(), "windows_sources.json");
         if (!configFile.exists() || configFile.length() == 0) {
             requestFolderConfiguration();
-        } else {
-            triggerPcStream(getEffectivePcIp());
-        }
+        } else {triggerPcStream(getEffectivePcIp());}
     }
 
     private void setupTopControlBar() {
@@ -203,12 +201,10 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
         LinearLayout deletionSecurityRow = new LinearLayout(this);
         deletionSecurityRow.setOrientation(LinearLayout.HORIZONTAL);
         deletionSecurityRow.setPadding(0, 10, 0, 0);
-
         chkAllowDeletions = new CheckBox(this);
         chkAllowDeletions.setText("Allow Remote Deletions");
         chkAllowDeletions.setTextColor(Color.parseColor("#FCA5A5"));
         chkAllowDeletions.setTextSize(12);
-
         tvDeletionPin = new TextView(this);
         tvDeletionPin.setText(" [PIN: LOCKED]");
         tvDeletionPin.setTextColor(Color.parseColor("#94A3B8"));
@@ -519,30 +515,19 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
         if (isPromptShowing) return;
         isPromptShowing = true;
         final String defaultTarget = "/storage/emulated/0/" + folderName;
-        new AlertDialog.Builder(this)
-            .setTitle("New Folder Pair Discovered")
-            .setMessage("Windows Source:\n" + localPath + "\n\nChoose destination on Android:\nDefault: " + defaultTarget)
-            .setCancelable(false)
-            .setPositiveButton("Use Default", (dialog, which) -> {
+        new AlertDialog.Builder(this).setTitle("New Folder Pair Discovered").setMessage("Windows Source:\n" + localPath + "\n\nChoose destination on Android:\nDefault: " + defaultTarget).setCancelable(false).setPositiveButton("Use Default", (dialog, which) -> {
                 isPromptShowing = false;
-                prefs.edit()
-                    .putString(folderId, defaultTarget)
-                    .putBoolean(folderId + "_confirmed", true)
-                    .putBoolean(folderId + "_sync_enabled", true)
-                    .apply();
+                prefs.edit().putString(folderId, defaultTarget).putBoolean(folderId + "_confirmed", true).putBoolean(folderId + "_sync_enabled", true).apply();
                 readSourcesFromFile();
                 triggerPcStream(getEffectivePcIp());
-            })
-            .setNeutralButton("Select Folder...", (dialog, which) -> {
+            }).setNeutralButton("Select Folder...", (dialog, which) -> {
                 isPromptShowing = false;
                 activePickingFolderId = folderId;
                 Intent pickerIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
                 startActivityForResult(pickerIntent, REQ_PICK_FOLDER);
-            })
-            .setNegativeButton("Configure Later", (dialog, which) -> {
+            }).setNegativeButton("Configure Later", (dialog, which) -> {
                 isPromptShowing = false;
-            })
-            .show();
+            }).show();
     }
 
     private void renderWindowsSources(String jsonStr) {
@@ -557,7 +542,6 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
             String unconfirmedId = null;
             String unconfirmedName = null;
             String unconfirmedPath = null;
-
             for (int i = 0; i < array.length(); i++) {
                 JSONObject obj = array.getJSONObject(i);
                 final String folderId = obj.optString("id");
@@ -579,13 +563,11 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                 final boolean isConfirmed = prefs.getBoolean(folderId + "_confirmed", false);
                 final boolean isMirrorExact = prefs.getBoolean(folderId + "_mirror_exact", false);
                 final boolean isSyncEnabled = prefs.getBoolean(folderId + "_sync_enabled", true) && isConfirmed;
-
                 if (!isConfirmed && unconfirmedId == null) {
                     unconfirmedId = folderId;
                     unconfirmedName = folderName;
                     unconfirmedPath = localPath;
                 }
-
                 LinearLayout card = new LinearLayout(this);
                 card.setOrientation(LinearLayout.VERTICAL);
                 card.setPadding(16, 14, 16, 14);
@@ -593,7 +575,6 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                 LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
                 cardParams.setMargins(0, 0, 0, 12);
                 card.setLayoutParams(cardParams);
-
                 LinearLayout headerRow = new LinearLayout(this);
                 headerRow.setOrientation(LinearLayout.HORIZONTAL);
                 TextView tvTitle = new TextView(this);
@@ -610,11 +591,9 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                 chkSync.setTextSize(12);
                 chkSync.setChecked(isSyncEnabled);
                 chkSync.setEnabled(isConfirmed);
-
                 headerRow.addView(tvTitle);
                 headerRow.addView(chkSync);
                 card.addView(headerRow);
-
                 TextView tvPaths = new TextView(this);
                 String destDisplay = isConfirmed ? savedTarget : "[Tap below to select destination folder]";
                 tvPaths.setText("PC: " + localPath + "\nAndroid: " + destDisplay);
@@ -622,7 +601,6 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                 tvPaths.setTextSize(11);
                 tvPaths.setPadding(0, 4, 0, 4);
                 card.addView(tvPaths);
-
                 TextView tvManifestAudit = new TextView(this);
                 tvManifestAudit.setText("Filters: [" + extsSummary + "] | Scrub: " + scrubText + " | Tap for manifest");
                 tvManifestAudit.setTextColor(Color.parseColor("#38BDF8"));
@@ -631,11 +609,9 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                 tvManifestAudit.setOnClickListener(v -> showManifestDialog(folderId, folderName));
                 manifestStatusViews.put(folderId, tvManifestAudit);
                 card.addView(tvManifestAudit);
-
                 LinearLayout actionsRow = new LinearLayout(this);
                 actionsRow.setOrientation(LinearLayout.HORIZONTAL);
                 actionsRow.setPadding(0, 4, 0, 0);
-
                 Button btnFolderAction = new Button(this);
                 btnFolderAction.setText(isConfirmed ? "📁 Change Destination" : "⚡ Choose Destination");
                 btnFolderAction.setTextSize(11);
@@ -652,7 +628,6 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                 chkMirror.setEnabled(isSyncEnabled);
                 chkMirror.setPadding(12, 0, 0, 0);
                 chkMirror.setOnCheckedChangeListener((btn, isChecked) -> prefs.edit().putBoolean(folderId + "_mirror_exact", isChecked).apply());
-
                 actionsRow.addView(btnFolderAction);
                 actionsRow.addView(chkMirror);
                 card.addView(actionsRow);
@@ -662,17 +637,11 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                     chkSync.setText(isChecked ? "Active" : "Paused");
                     chkSync.setTextColor(isChecked ? Color.parseColor("#4ADE80") : Color.parseColor("#94A3B8"));
                     chkMirror.setEnabled(isChecked);
-                    if (isChecked && isConfirmed) {
-                        triggerPcStream(getEffectivePcIp());
-                    }
+                    if (isChecked && isConfirmed) {triggerPcStream(getEffectivePcIp());}
                 });
-
                 containerFolderPairs.addView(card);
             }
-
-            if (unconfirmedId != null && !isFinishing()) {
-                promptFolderDestination(unconfirmedId, unconfirmedName, unconfirmedPath);
-            }
+            if (unconfirmedId != null && !isFinishing()) {promptFolderDestination(unconfirmedId, unconfirmedName, unconfirmedPath);}
         } catch (Exception ignored) {}
     }
 
@@ -700,11 +669,7 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                     getContentResolver().takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                 } catch (Exception ignored) {}
                 String finalPath = convertUriToStoragePath(treeUri);
-                prefs.edit()
-                    .putString(activePickingFolderId, finalPath)
-                    .putBoolean(activePickingFolderId + "_confirmed", true)
-                    .putBoolean(activePickingFolderId + "_sync_enabled", true)
-                    .apply();
+                prefs.edit().putString(activePickingFolderId, finalPath).putBoolean(activePickingFolderId + "_confirmed", true).putBoolean(activePickingFolderId + "_sync_enabled", true).apply();
                 activePickingFolderId = null;
                 readSourcesFromFile();
                 triggerPcStream(getEffectivePcIp());

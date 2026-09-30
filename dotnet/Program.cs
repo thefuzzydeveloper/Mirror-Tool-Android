@@ -124,8 +124,7 @@ internal static class Program{
             Application.Exit();
         });
         _trayIcon = new NotifyIcon { Icon = _idleIcon ?? SystemIcons.Application, ContextMenuStrip = menu, Text = "Wi-Fi Sync | Initializing...", Visible = true };
-        _trayIcon.MouseClick += (s, e) =>
-        {
+        _trayIcon.MouseClick += (s, e) =>{
             if (e.Button == MouseButtons.Left) { ToggleBrowserWindow(); }
         };
         _trayIcon.ShowBalloonTip(2000, "WiFiAutoStreamSync", "App is running minimized in system tray.", ToolTipIcon.Info);
@@ -162,11 +161,9 @@ internal static class Program{
         }
     }
 
-    public static void ToggleBrowserWindow()
-    {
+    public static void ToggleBrowserWindow(){
         if (_engine == null) return;
-        if (_activeBrowserWindow != null && !_activeBrowserWindow.IsDisposed)
-        {
+        if (_activeBrowserWindow != null && !_activeBrowserWindow.IsDisposed){
             _activeBrowserWindow.Close();
             _activeBrowserWindow = null;
             return;
@@ -174,18 +171,15 @@ internal static class Program{
         ShowOrFocusBrowserWindow();
     }
 
-    public static void ShowOrFocusBrowserWindow()
-    {
+    public static void ShowOrFocusBrowserWindow(){
         if (_engine == null) return;
-        if (_activeBrowserWindow != null && !_activeBrowserWindow.IsDisposed)
-        {
+        if (_activeBrowserWindow != null && !_activeBrowserWindow.IsDisposed){
             if (_activeBrowserWindow.WindowState == FormWindowState.Minimized)
                 _activeBrowserWindow.WindowState = FormWindowState.Normal;
             _activeBrowserWindow.Activate();
             _activeBrowserWindow.BringToFront();
             return;
         }
-
         _activeBrowserWindow = new DeviceBrowserWindow(_engine);
         _activeBrowserWindow.Show();
         _activeBrowserWindow.BringToFront();
@@ -479,34 +473,25 @@ public static class ConfigManager{
         try{
             string fileName = Path.GetFileName(filePath);
             if (string.IsNullOrEmpty(fileName)) return true;
-
             // Microsoft Office owner lock files (e.g. ~$document.docx, ~$newdocument.docx)
             if (fileName.StartsWith("~$", StringComparison.OrdinalIgnoreCase))
                 return true;
-
             // LibreOffice / OpenOffice lock files (e.g. .~lock.document.docx#)
             if (fileName.StartsWith(".~lock.", StringComparison.OrdinalIgnoreCase))
                 return true;
-
             // Text editor and auto-save lock files (.#document.docx, document.docx~)
             if (fileName.StartsWith(".#") || fileName.EndsWith("~"))
                 return true;
-
             // Office temporary and scratch working files (~WRL*.tmp, ~WRD*.tmp, ~*.tmp)
             if (fileName.StartsWith("~") && (fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) || fileName.EndsWith(".temp", StringComparison.OrdinalIgnoreCase)))
                 return true;
-
             // Common intermediate, swap, and incomplete transfer files
             string ext = Path.GetExtension(fileName).ToLowerInvariant();
             if (ext is ".tmp" or ".temp" or ".swp" or ".swo" or ".crdownload" or ".part" or ".partial" or ".upload_tmp")
                 return true;
-
             // OS-generated metadata files
-            if (fileName.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) ||
-                fileName.Equals("thumbs.db", StringComparison.OrdinalIgnoreCase) ||
-                fileName.Equals(".DS_Store", StringComparison.OrdinalIgnoreCase))
+            if (fileName.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) || fileName.Equals("thumbs.db", StringComparison.OrdinalIgnoreCase) || fileName.Equals(".DS_Store", StringComparison.OrdinalIgnoreCase))
                 return true;
-
             if (File.Exists(filePath)){
                 var attrs = File.GetAttributes(filePath);
                 if ((attrs & FileAttributes.Temporary) != 0)
@@ -525,15 +510,9 @@ public static class ConfigManager{
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             return false;
         }
-        catch (IOException){
-            return true;
-        }
-        catch (UnauthorizedAccessException){
-            return true;
-        }
-        catch{
-            return false;
-        }
+        catch (IOException){return true;}
+        catch (UnauthorizedAccessException){return true;}
+        catch{return false;}
     }
 
     public static bool IsSyncableFile(string filePath, List<string> allowedExtensions, List<string>? ignoredExtensions = null, bool checkLock = true){
@@ -1426,10 +1405,8 @@ public sealed class SyncEngine : IAsyncDisposable{
         }
         var newCts = new CancellationTokenSource();
         _debounceMap[key] = newCts;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
+        _ = Task.Run(async () =>{
+            try{
                 await Task.Delay(1200, newCts.Token);
                 await ExecuteFolderSyncAcrossAllDevicesAsync(folder, _cts.Token);
             }
@@ -1456,36 +1433,27 @@ public sealed class SyncEngine : IAsyncDisposable{
             string folderId = ConfigManager.ComputeFolderId(folderPath);
             var winManifest = new Dictionary<string, long>();
             var targetToLocal = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
-            {
+            foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories)){
                 if (!ConfigManager.IsSyncableFile(file, folder.Extensions, folder.IgnoredExtensions)) continue;
                 string rel = Path.GetRelativePath(folderPath, file).Replace('\\', '/').TrimStart('/');
                 string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
-                try
-                {
+                try{
                     winManifest[targetRel] = new FileInfo(file).Length;
                     targetToLocal[targetRel] = file;
                 }
                 catch { }
             }
-
-            foreach (var client in clients)
-            {
+            foreach (var client in clients){
                 if (ct.IsCancellationRequested) break;
                 if (!await client.EnsureConnectedAsync(ct)) continue;
-
                 _statusCallback($"Auditing manifest ({client.RemoteIp})...", true);
                 var report = await client.ExchangeManifestAsync(folderId, winManifest, ct);
                 if (report == null) continue;
-
-                if (report.Needed.Count > 0)
-                {
-                    foreach (var neededRel in report.Needed)
-                    {
+                if (report.Needed.Count > 0){
+                    foreach (var neededRel in report.Needed){
                         if (ct.IsCancellationRequested) break;
                         string cleanKey = neededRel.Replace('\\', '/').TrimStart('/');
-                        if (targetToLocal.TryGetValue(cleanKey, out var localPath) && File.Exists(localPath))
-                        {
+                        if (targetToLocal.TryGetValue(cleanKey, out var localPath) && File.Exists(localPath)){
                             if (ConfigManager.IsIntermediateOrLockFile(localPath)) continue;
                             _statusCallback($"Syncing: {Path.GetFileName(localPath)}", true);
                             await client.StreamFileAsync(folderId, localPath, cleanKey, ct);
@@ -1619,9 +1587,7 @@ public sealed class SyncEngine : IAsyncDisposable{
         catch (Exception ex){
             Program.Log($"SyncFullDeviceAuditAsync EXCEPTION: {ex.Message}");
         }
-        finally{
-            _activeAudits.TryRemove(client.RemoteIp, out _);
-        }
+        finally{_activeAudits.TryRemove(client.RemoteIp, out _);}
     }
 
     private async Task RunUdpBeaconAsync(CancellationToken ct){
@@ -1676,9 +1642,7 @@ public sealed class SyncEngine : IAsyncDisposable{
         if (!string.IsNullOrWhiteSpace(ip)){
             _ = Task.Run(async () =>{
                 try{
-                    if (_clients.TryGetValue(ip, out var client) && client.IsConnected){
-                        await SyncFullDeviceAuditAsync(client, _cts.Token);
-                    }
+                    if (_clients.TryGetValue(ip, out var client) && client.IsConnected){await SyncFullDeviceAuditAsync(client, _cts.Token);}
                     else{
                         Program.Log($"TriggerSync: Device {ip} requested sync, connecting...");
                         await ConnectSingleDeviceAsync(ip, _cts.Token);
@@ -1690,9 +1654,7 @@ public sealed class SyncEngine : IAsyncDisposable{
             });
         }
         else{
-            foreach (var c in _clients.Values.Where(c => c.IsConnected)){
-                _ = SyncFullDeviceAuditAsync(c, _cts.Token);
-            }
+            foreach (var c in _clients.Values.Where(c => c.IsConnected)){_ = SyncFullDeviceAuditAsync(c, _cts.Token);}
         }
     }
 
@@ -1718,8 +1680,7 @@ public sealed class SyncEngine : IAsyncDisposable{
             var manifest = new Dictionary<string, long>();
             if (Directory.Exists(full)){
                 try{
-                    foreach (var file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
-                    {
+                    foreach (var file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories)){
                         if (!ConfigManager.IsSyncableFile(file, folder.Extensions, folder.IgnoredExtensions, checkLock: false)) continue;
                         string rel = Path.GetRelativePath(full, file).Replace('\\', '/').TrimStart('/');
                         string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');

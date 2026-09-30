@@ -199,15 +199,9 @@ public sealed class DeviceBrowserWindow : Form{
             MessageBox.Show(this, "Please select at least one item from the list first.", "No Item Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        var selectedItems = _fileListView.SelectedItems.Cast<ListViewItem>()
-            .Select(lvi => lvi.Tag as AndroidFileItem)
-            .Where(i => i != null)
-            .ToList();
-
+        var selectedItems = _fileListView.SelectedItems.Cast<ListViewItem>().Select(lvi => lvi.Tag as AndroidFileItem).Where(i => i != null).ToList();
         using var fbd = new FolderBrowserDialog{
-            Description = selectedItems.Count == 1 ? $"Select directory on any disk/drive to save '{selectedItems[0]!.Name}' directly:" : $"Select directory on any disk/drive to save {selectedItems.Count} selected items:",
-            UseDescriptionForTitle = true,
-            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            Description = selectedItems.Count == 1 ? $"Select directory on any disk/drive to save '{selectedItems[0]!.Name}' directly:" : $"Select directory on any disk/drive to save {selectedItems.Count} selected items:", UseDescriptionForTitle = true, InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
         };
         if (fbd.ShowDialog(this) == DialogResult.OK){
             foreach (var item in selectedItems){
@@ -387,16 +381,9 @@ public sealed class DeviceBrowserWindow : Form{
 
     private async Task DeleteSelectedItemAsync(){
         if (_currentClient == null || _fileListView.SelectedItems.Count == 0) return;
-        var selectedItems = _fileListView.SelectedItems.Cast<ListViewItem>()
-            .Select(lvi => lvi.Tag as AndroidFileItem)
-            .Where(i => i != null)
-            .ToList();
+        var selectedItems = _fileListView.SelectedItems.Cast<ListViewItem>().Select(lvi => lvi.Tag as AndroidFileItem).Where(i => i != null).ToList();
         if (selectedItems.Count == 0) return;
-
-        string promptMsg = selectedItems.Count == 1
-            ? $"Are you sure you want to permanently delete:\n{selectedItems[0]!.Name}?"
-            : $"Are you sure you want to permanently delete {selectedItems.Count} selected items on Android?";
-
+        string promptMsg = selectedItems.Count == 1 ? $"Are you sure you want to permanently delete:\n{selectedItems[0]!.Name}?" : $"Are you sure you want to permanently delete {selectedItems.Count} selected items on Android?";
         if (MessageBox.Show(this, promptMsg, "Confirm Deletion", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes){
             if (string.IsNullOrEmpty(_currentClient.DeletionAuthToken)){
                 string token = ShowInputDialog(this, "Enter 6-digit Deletion PIN displayed in the Android app:", "Deletion Authentication Required", "", isPassword: true);
@@ -450,11 +437,7 @@ public sealed class DeviceBrowserWindow : Form{
 
     private void PopulateContextMenu(ContextMenuStrip menu){
         menu.Items.Clear();
-        var selected = _fileListView.SelectedItems.Cast<ListViewItem>()
-            .Select(lvi => lvi.Tag as AndroidFileItem)
-            .Where(i => i != null)
-            .ToList();
-
+        var selected = _fileListView.SelectedItems.Cast<ListViewItem>().Select(lvi => lvi.Tag as AndroidFileItem).Where(i => i != null).ToList();
         if (selected.Count == 0){
             menu.Items.Add("📁 Save Current Folder to PC...", null, async (s, e) => await SaveCurrentFolderToPcAsync());
             menu.Items.Add(new ToolStripSeparator());
@@ -464,7 +447,6 @@ public sealed class DeviceBrowserWindow : Form{
             menu.Items.Add("🔄 Refresh", null, async (s, e) => await LoadDirectoryAsync(_currentPath));
             return;
         }
-
         if (selected.Count == 1){
             var item = selected[0]!;
             if (item.IsDir){
@@ -482,10 +464,8 @@ public sealed class DeviceBrowserWindow : Form{
             }
             return;
         }
-
         int dirCount = selected.Count(i => i!.IsDir);
         int fileCount = selected.Count - dirCount;
-
         if (dirCount == 0){
             menu.Items.Add($"💾 Save Selected Files to PC Folder ({fileCount} files)...", null, async (s, e) => await SaveSelectedFileToFolderAsync());
         }
@@ -495,7 +475,6 @@ public sealed class DeviceBrowserWindow : Form{
         else{
             menu.Items.Add($"💾 Save Selected Items to PC ({selected.Count} items)...", null, async (s, e) => await SaveSelectedFileToFolderAsync());
         }
-
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add($"🗑 Delete on Android ({selected.Count} items)", null, async (s, e) => await DeleteSelectedItemAsync());
     }
@@ -519,9 +498,7 @@ public sealed class DeviceBrowserWindow : Form{
                     foreach (ListViewItem item in Items)
                         item.Selected = true;
                 }
-                finally{
-                    EndUpdate();
-                }
+                finally{EndUpdate();}
                 return;
             }
             base.OnKeyDown(e);
@@ -556,28 +533,19 @@ public sealed class DeviceBrowserWindow : Form{
                     int w = Math.Abs(_dragStart.X - e.X);
                     int h = Math.Abs(_dragStart.Y - e.Y);
                     _rubberbandRect = new Rectangle(x, y, w, h);
-
                     bool isCtrl = (ModifierKeys & Keys.Control) == Keys.Control;
                     BeginUpdate();
                     try{
                         foreach (ListViewItem item in Items){
                             bool inside = _rubberbandRect.IntersectsWith(item.Bounds);
                             if (isCtrl){
-                                if (inside){
-                                    item.Selected = false;
-                                }
-                                else{
-                                    item.Selected = _initialSelection.Contains(item);
-                                }
+                                if (inside){item.Selected = false;}
+                                else{item.Selected = _initialSelection.Contains(item);}
                             }
-                            else{
-                                item.Selected = inside;
-                            }
+                            else{item.Selected = inside;}
                         }
                     }
-                    finally{
-                        EndUpdate();
-                    }
+                    finally{EndUpdate();}
                     Invalidate();
                 }
             }

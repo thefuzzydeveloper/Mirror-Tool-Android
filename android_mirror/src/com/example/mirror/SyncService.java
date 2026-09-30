@@ -66,9 +66,7 @@ public class SyncService extends Service{
             paths = pendingScanPaths.toArray(new String[0]);
             pendingScanPaths.clear();
         }
-        if (paths.length > 0) {
-            MediaScannerConnection.scanFile(this, paths, null, null);
-        }
+        if (paths.length > 0) {MediaScannerConnection.scanFile(this, paths, null, null);}
     }
 
     public static boolean isIntermediateOrLockFile(String name) {
@@ -76,8 +74,7 @@ public class SyncService extends Service{
         String lower = name.toLowerCase(Locale.ROOT);
         if (name.startsWith("~$") || name.startsWith(".~lock.") || name.startsWith(".#") || name.endsWith("~")) return true;
         if (name.startsWith("~") && (lower.endsWith(".tmp") || lower.endsWith(".temp"))) return true;
-        if (lower.endsWith(".tmp") || lower.endsWith(".temp") || lower.endsWith(".swp") || lower.endsWith(".swo") ||
-            lower.endsWith(".crdownload") || lower.endsWith(".part") || lower.endsWith(".partial") || lower.endsWith(".upload_tmp")) return true;
+        if (lower.endsWith(".tmp") || lower.endsWith(".temp") || lower.endsWith(".swp") || lower.endsWith(".swo") || lower.endsWith(".crdownload") || lower.endsWith(".part") || lower.endsWith(".partial") || lower.endsWith(".upload_tmp")) return true;
         if (lower.equals("desktop.ini") || lower.equals("thumbs.db") || lower.equals(".ds_store")) return true;
         return false;
     }
@@ -91,10 +88,7 @@ public class SyncService extends Service{
     }
 
     private synchronized boolean verifyDeletionPin(String presentedToken) {
-        if (!isDeletionAllowed || activeDeletionPin.isEmpty()) {
-            return false;
-        }
-
+        if (!isDeletionAllowed || activeDeletionPin.isEmpty()) {return false;}
         long now = System.currentTimeMillis();
         if (pinExpiresAtMs > 0 && now > pinExpiresAtMs) {
             isDeletionAllowed = false;
@@ -103,19 +97,16 @@ public class SyncService extends Service{
             sendBroadcast(new Intent(ACTION_DELETION_LOCKED).setPackage(getPackageName()));
             return false;
         }
-
         if (now < pinLockoutUntilMs) {
             broadcastStatus("Deletion blocked: Temporary lockout active");
             return false;
         }
-
         boolean matches = false;
         try {
             byte[] a = activeDeletionPin.getBytes("UTF-8");
             byte[] b = (presentedToken != null ? presentedToken : "").getBytes("UTF-8");
             matches = java.security.MessageDigest.isEqual(a, b);
         } catch (Exception ignored) {}
-
         if (matches) {
             failedPinAttempts = 0;
             pinExpiresAtMs = System.currentTimeMillis() + 180000L;
@@ -123,7 +114,6 @@ public class SyncService extends Service{
         } else {
             failedPinAttempts++;
             try { Thread.sleep(1200); } catch (InterruptedException ignored) {}
-
             if (failedPinAttempts >= 3) {
                 isDeletionAllowed = false;
                 activeDeletionPin = "";
@@ -131,9 +121,7 @@ public class SyncService extends Service{
                 pinLockoutUntilMs = now + 60000L;
                 broadcastStatus("SECURITY ALERT: Repeated invalid PINs! Remote deletions revoked.");
                 sendBroadcast(new Intent(ACTION_DELETION_LOCKED).setPackage(getPackageName()));
-            } else {
-                broadcastStatus("Invalid PIN rejected (" + failedPinAttempts + "/3 attempts)");
-            }
+            } else {broadcastStatus("Invalid PIN rejected (" + failedPinAttempts + "/3 attempts)");}
             return false;
         }
     }
@@ -244,9 +232,7 @@ public class SyncService extends Service{
                             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                             String currentSaved = prefs.getString("last_pc_ip", "");
                             boolean ipChanged = !pcIp.equals(currentSaved);
-                            if (ipChanged) {
-                                prefs.edit().putString("last_pc_ip", pcIp).apply();
-                            }
+                            if (ipChanged) {prefs.edit().putString("last_pc_ip", pcIp).apply();}
                             Intent intent = new Intent(ACTION_PC_DISCOVERED);
                             intent.putExtra("pc_ip", pcIp);
                             intent.setPackage(getPackageName());
@@ -309,9 +295,7 @@ public class SyncService extends Service{
                 int cmd = dis.readByte();
                 if (cmd == CMD_FILE_STREAM || cmd == CMD_PULL_FILE || cmd == CMD_PUSH_FILE_DIRECT) {
                     acquireTransferWakeLock(180000L);
-                } else if (cmd == CMD_MANIFEST_EXCHANGE) {
-                    acquireTransferWakeLock(30000L);
-                }
+                } else if (cmd == CMD_MANIFEST_EXCHANGE) {acquireTransferWakeLock(30000L);}
                 if (cmd == CMD_WAKE_SYNC) {
                     // Demand condition 1: File changed on PC, immediate synchronization woken
                     broadcastStatus("Waking Up: Remote Changes Detected");
@@ -657,17 +641,13 @@ public class SyncService extends Service{
         File configFile = new File(getFilesDir(), "windows_sources.json");
         if (!configFile.exists() || configFile.length() == 0) {
             fetchConfigFromPc(this, pcIp, () -> triggerManifestSyncFromAndroid(pcIp, true));
-        } else if (forceSync) {
-            triggerManifestSyncFromAndroid(pcIp, false);
-        }
+        } else if (forceSync) {triggerManifestSyncFromAndroid(pcIp, false);}
     }
 
     private void triggerManifestSyncFromAndroid(final String pcIp, boolean force) {
         if (pcIp == null || pcIp.trim().isEmpty()) return;
         long now = System.currentTimeMillis();
-        if (!force && (now - lastTriggerSyncTimeMs < TRIGGER_COOLDOWN_MS)) {
-            return;
-        }
+        if (!force && (now - lastTriggerSyncTimeMs < TRIGGER_COOLDOWN_MS)) {return;}
         lastTriggerSyncTimeMs = now;
         new Thread(() -> {
             try {
@@ -824,16 +804,12 @@ public class SyncService extends Service{
         try {
             String rootAbs = root.getAbsolutePath();
             String fileAbs = file.getAbsolutePath();
-            if (fileAbs.startsWith(rootAbs)) {
-                return normalizePath(fileAbs.substring(rootAbs.length()));
-            }
+            if (fileAbs.startsWith(rootAbs)) {return normalizePath(fileAbs.substring(rootAbs.length()));}
             URI baseUri = root.toURI();
             URI fileUri = file.toURI();
             String rel = baseUri.relativize(fileUri).getPath();
             return normalizePath(rel);
-        } catch (Exception e) {
-            return file.getName();
-        }
+        } catch (Exception e) {return file.getName();}
     }
 
     private JSONObject evaluateManifest(String folderId, JSONObject winManifest) {
@@ -865,9 +841,7 @@ public class SyncService extends Service{
             return report;
         }
         String targetRoot = prefs.getString(folderId, null);
-        if (targetRoot == null || targetRoot.trim().isEmpty()) {
-            targetRoot = getTargetDirectoryFallback(folderId);
-        }
+        if (targetRoot == null || targetRoot.trim().isEmpty()) {targetRoot = getTargetDirectoryFallback(folderId);}
         try {
             if (!isEnabled) {
                 report.put("needed", neededArr);

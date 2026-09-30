@@ -1,3 +1,4 @@
+# android_mirror/build_apk.py
 # android_mirror/build_android.py
 import os
 import shutil
@@ -237,11 +238,9 @@ def deploy(apk: Path):
             device_connected = any("\tdevice" in line or line.endswith(" device") for line in lines)
     except Exception:
         device_connected = False
-
     if not device_connected:
         log_info("No Android device connected via ADB. Skipping device installation.")
         return
-
     run_command(
         ["adb", "install", "-r", str(apk)],
         "Installing APK to connected device...",
