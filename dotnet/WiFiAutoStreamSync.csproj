@@ -1,3 +1,4 @@
+<!-- dotnet/WiFiAutoStreamSync.csproj -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -7,7 +8,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
   </ItemGroup>

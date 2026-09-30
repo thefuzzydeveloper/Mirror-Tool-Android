@@ -1,5 +1,5 @@
+// android_mirror/src/com/example/mirror/SyncService.java
 package com.example.mirror;
-
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -23,12 +23,13 @@ import java.util.*;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-public class SyncService extends Service {
+public class SyncService extends Service{
     public static final String ACTION_STATUS_UPDATE = "com.example.mirror.STATUS_UPDATE";
     public static final String ACTION_CONFIG_REFRESH = "com.example.mirror.CONFIG_REFRESH";
     public static final String ACTION_MANIFEST_VERIFIED = "com.example.mirror.MANIFEST_VERIFIED";
     public static final String ACTION_PC_DISCOVERED = "com.example.mirror.PC_DISCOVERED";
     public static final String ACTION_FETCH_CONFIG = "com.example.mirror.FETCH_CONFIG";
+    public static final String ACTION_DELETION_LOCKED = "com.example.mirror.DELETION_LOCKED";
 
     public static final int TCP_DATA_PORT = 58421;
     public static final int HTTP_MANIFEST_PORT = 58422;
@@ -51,6 +52,65 @@ public class SyncService extends Service {
 
     public static volatile String activeDeletionPin = "";
     public static volatile boolean isDeletionAllowed = false;
+    private static volatile int failedPinAttempts = 0;
+    private static volatile long pinLockoutUntilMs = 0;
+    private static volatile long pinExpiresAtMs = 0;
+
+    public static synchronized void setDeletionPin(String pin, long validityDurationMs) {
+        activeDeletionPin = pin != null ? pin : "";
+        isDeletionAllowed = !activeDeletionPin.isEmpty();
+        failedPinAttempts = 0;
+        pinLockoutUntilMs = 0;
+        pinExpiresAtMs = isDeletionAllowed ? (System.currentTimeMillis() + validityDurationMs) : 0;
+    }
+
+    private synchronized boolean verifyDeletionPin(String presentedToken) {
+        if (!isDeletionAllowed || activeDeletionPin.isEmpty()) {
+            return false;
+        }
+
+        long now = System.currentTimeMillis();
+        if (pinExpiresAtMs > 0 && now > pinExpiresAtMs) {
+            isDeletionAllowed = false;
+            activeDeletionPin = "";
+            broadcastStatus("Deletion PIN expired (Session Timed Out)");
+            sendBroadcast(new Intent(ACTION_DELETION_LOCKED).setPackage(getPackageName()));
+            return false;
+        }
+
+        if (now < pinLockoutUntilMs) {
+            broadcastStatus("Deletion blocked: Temporary lockout active");
+            return false;
+        }
+
+        boolean matches = false;
+        try {
+            byte[] a = activeDeletionPin.getBytes("UTF-8");
+            byte[] b = (presentedToken != null ? presentedToken : "").getBytes("UTF-8");
+            matches = java.security.MessageDigest.isEqual(a, b);
+        } catch (Exception ignored) {}
+
+        if (matches) {
+            failedPinAttempts = 0;
+            pinExpiresAtMs = System.currentTimeMillis() + 180000L;
+            return true;
+        } else {
+            failedPinAttempts++;
+            try { Thread.sleep(1200); } catch (InterruptedException ignored) {}
+
+            if (failedPinAttempts >= 3) {
+                isDeletionAllowed = false;
+                activeDeletionPin = "";
+                failedPinAttempts = 0;
+                pinLockoutUntilMs = now + 60000L;
+                broadcastStatus("SECURITY ALERT: Repeated invalid PINs! Remote deletions revoked.");
+                sendBroadcast(new Intent(ACTION_DELETION_LOCKED).setPackage(getPackageName()));
+            } else {
+                broadcastStatus("Invalid PIN rejected (" + failedPinAttempts + "/3 attempts)");
+            }
+            return false;
+        }
+    }
 
     private static final String CHANNEL_ID = "mirror_tcp_channel";
     private static final int NOTIF_ID = 505;
@@ -73,7 +133,7 @@ public class SyncService extends Service {
         } catch (UnsatisfiedLinkError ignored) {}
     }
 
-    public interface ConfigUpdateListener {
+    public interface ConfigUpdateListener{
         void onConfigUpdated(String jsonConfig);
     }
     public static ConfigUpdateListener activeListener = null;
@@ -83,13 +143,11 @@ public class SyncService extends Service {
         super.onCreate();
         createNotificationChannel();
         notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null) {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MirrorSync::TransferLock");
             wakeLock.setReferenceCounted(false);
         }
-
         WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         if (wm != null) {
             try {
@@ -132,13 +190,11 @@ public class SyncService extends Service {
             startNetworkServer();
             startUdpBeaconListener();
         }
-
         if (intent != null && ACTION_FETCH_CONFIG.equals(intent.getAction())) {
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
             String pcIp = prefs.getString("last_pc_ip", "");
             if (!pcIp.isEmpty()) fetchConfigFromPc(this, pcIp, null);
         }
-
         return START_STICKY;
     }
 
@@ -150,38 +206,28 @@ public class SyncService extends Service {
                 socket.setReuseAddress(true);
                 socket.setBroadcast(true);
                 socket.bind(new InetSocketAddress("0.0.0.0", UDP_BEACON_PORT));
-
                 byte[] buf = new byte[1024];
                 DatagramPacket packet = new DatagramPacket(buf, buf.length);
-
                 while (isRunning) {
                     try {
                         socket.receive(packet);
                         String msg = new String(packet.getData(), 0, packet.getLength(), "UTF-8").trim();
-
                         if (msg.startsWith("MIRROR_PC_ANNOUNCE:")) {
                             String pcIp = msg.split(":", 2)[1].trim();
                             if (pcIp.isEmpty()) pcIp = packet.getAddress().getHostAddress();
-
                             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                             String currentSaved = prefs.getString("last_pc_ip", "");
-                            if (!pcIp.equals(currentSaved)) {
-                                prefs.edit().putString("last_pc_ip", pcIp).apply();
-                            }
-
+                            if (!pcIp.equals(currentSaved)) {prefs.edit().putString("last_pc_ip", pcIp).apply();}
                             Intent intent = new Intent(ACTION_PC_DISCOVERED);
                             intent.putExtra("pc_ip", pcIp);
                             intent.setPackage(getPackageName());
                             sendBroadcast(intent);
-
                             ensureConfigLoadedFromPc(pcIp);
                         }
                     } catch (Exception ignored) {}
                 }
             } catch (Exception ignored) {
-            } finally {
-                if (socket != null && !socket.isClosed()) socket.close();
-            }
+            } finally {if (socket != null && !socket.isClosed()) socket.close();}
         });
         udpBeaconThread.start();
     }
@@ -190,20 +236,14 @@ public class SyncService extends Service {
         new Thread(() -> {
             DatagramSocket socket = null;
             try {
-                if (context instanceof SyncService) {
-                    ((SyncService) context).acquireTemporaryMulticastLock(15000);
-                }
+                if (context instanceof SyncService) {((SyncService) context).acquireTemporaryMulticastLock(15000);}
                 socket = new DatagramSocket();
                 socket.setBroadcast(true);
                 byte[] data = "MIRROR_QUERY_PC".getBytes("UTF-8");
-                DatagramPacket packet = new DatagramPacket(
-                        data, data.length, InetAddress.getByName("255.255.255.255"), UDP_BEACON_PORT
-                );
+                DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), UDP_BEACON_PORT);
                 socket.send(packet);
             } catch (Exception ignored) {
-            } finally {
-                if (socket != null) socket.close();
-            }
+            } finally {if (socket != null) socket.close();}
         }).start();
     }
 
@@ -213,51 +253,37 @@ public class SyncService extends Service {
                 serverSocket = new ServerSocket();
                 serverSocket.setReuseAddress(true);
                 serverSocket.bind(new InetSocketAddress("0.0.0.0", TCP_DATA_PORT), 50);
-
                 broadcastStatus("Server Online | Listening on :" + TCP_DATA_PORT);
                 updateNotification("Ready for PC (Port " + TCP_DATA_PORT + ")");
-
                 while (isRunning && !serverSocket.isClosed()) {
                     try {
                         final Socket client = serverSocket.accept();
                         client.setTcpNoDelay(true);
                         client.setKeepAlive(true);
                         new Thread(() -> handleClient(client)).start();
-                    } catch (IOException e) {
-                        if (!isRunning) break;
-                    }
+                    } catch (IOException e) {if (!isRunning) break;}
                 }
-            } catch (IOException e) {
-                broadcastStatus("Server Port Error: " + e.getMessage());
-            }
+            } catch (IOException e) {broadcastStatus("Server Port Error: " + e.getMessage());}
         });
         tcpServerThread.start();
     }
 
     private void handleClient(Socket socket) {
-        try (DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 131072));
-             DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 131072))) {
-
+        try (DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 131072)); DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 131072))) {
             while (isRunning && !socket.isClosed()) {
                 byte m1, m2;
                 try {
                     m1 = dis.readByte();
                     m2 = dis.readByte();
-                } catch (EOFException e) {
-                    break;
-                }
-
+                } catch (EOFException e) {break;}
                 if (m1 != (byte) 0xAA || m2 != (byte) 0x55) break;
-
                 acquireTransferWakeLock(180000L);
                 int cmd = dis.readByte();
-
                 if (cmd == CMD_WAKE_SYNC) {
                     // Demand condition 1: File changed on PC, immediate synchronization woken
                     broadcastStatus("Waking Up: Remote Changes Detected");
                     dos.writeByte(0x00);
                     dos.flush();
-
                     String pcIp = socket.getInetAddress().getHostAddress();
                     ensureConfigLoadedFromPc(pcIp);
                     triggerManifestSyncFromAndroid(pcIp);
@@ -266,12 +292,10 @@ public class SyncService extends Service {
                     String pcIp = socket.getInetAddress().getHostAddress();
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                     prefs.edit().putString("last_pc_ip", pcIp).apply();
-
                     Intent intent = new Intent(ACTION_PC_DISCOVERED);
                     intent.putExtra("pc_ip", pcIp);
                     intent.setPackage(getPackageName());
                     sendBroadcast(intent);
-
                     dos.writeByte(0x00);
                     dos.flush();
                     ensureConfigLoadedFromPc(pcIp);
@@ -279,25 +303,16 @@ public class SyncService extends Service {
                 } else if (cmd == CMD_CONFIG) {
                     String pcIp = socket.getInetAddress().getHostAddress();
                     broadcastStatus("Connected to PC (" + pcIp + ")");
-
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                     prefs.edit().putString("last_pc_ip", pcIp).apply();
-
                     int len = dis.readInt();
                     byte[] data = new byte[len];
                     dis.readFully(data);
                     String jsonConfig = new String(data, "UTF-8");
-
                     File configFile = new File(getFilesDir(), "windows_sources.json");
-                    try (FileOutputStream fos = new FileOutputStream(configFile)) {
-                        fos.write(data);
-                    }
-
-                    if (activeListener != null) {
-                        activeListener.onConfigUpdated(jsonConfig);
-                    }
+                    try (FileOutputStream fos = new FileOutputStream(configFile)) {fos.write(data);}
+                    if (activeListener != null) {activeListener.onConfigUpdated(jsonConfig);}
                     sendBroadcast(new Intent(ACTION_CONFIG_REFRESH).setPackage(getPackageName()));
-
                     dos.writeByte(0x00);
                     dos.flush();
                     broadcastStatus("Configuration Synchronized");
@@ -307,16 +322,12 @@ public class SyncService extends Service {
                     byte[] fIdBytes = new byte[fIdLen];
                     dis.readFully(fIdBytes);
                     String folderId = new String(fIdBytes, "UTF-8");
-
                     int payloadLen = dis.readInt();
                     byte[] payloadBytes = new byte[payloadLen];
                     dis.readFully(payloadBytes);
-                    
                     JSONObject payloadObj = new JSONObject(new String(payloadBytes, "UTF-8"));
                     JSONObject winManifestObj = payloadObj.has("files") ? payloadObj.getJSONObject("files") : payloadObj;
-
                     JSONObject report = evaluateManifest(folderId, winManifestObj);
-
                     byte[] respBytes = report.toString().getBytes("UTF-8");
                     dos.writeInt(respBytes.length);
                     dos.write(respBytes);
@@ -327,38 +338,29 @@ public class SyncService extends Service {
                     byte[] fIdBytes = new byte[fIdLen];
                     dis.readFully(fIdBytes);
                     String folderId = new String(fIdBytes, "UTF-8");
-
                     int relLen = dis.readUnsignedShort();
                     byte[] relBytes = new byte[relLen];
                     dis.readFully(relBytes);
                     String rawRel = new String(relBytes, "UTF-8");
                     String relPath = sanitizeRemotePath(rawRel, getFolderNameById(folderId));
-
                     long fileSize = dis.readLong();
-
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    boolean isConfirmed = prefs.getBoolean(folderId + "_confirmed", false);
                     boolean isEnabled = prefs.getBoolean(folderId + "_sync_enabled", true);
                     String targetRoot = prefs.getString(folderId, null);
-                    if (targetRoot == null || targetRoot.isEmpty()) {
-                        targetRoot = getTargetDirectoryFallback(folderId);
-                    }
-
-                    if (!isEnabled) {
+                    if (targetRoot == null || targetRoot.isEmpty()) {targetRoot = getTargetDirectoryFallback(folderId);}
+                    if (!isConfirmed || !isEnabled) {
                         skipStreamBytes(dis, fileSize);
                         dos.writeByte(0x00);
                         dos.flush();
                         continue;
                     }
-
                     File targetFile = new File(targetRoot, relPath);
                     File parent = targetFile.getParentFile();
                     if (parent != null && !parent.exists()) parent.mkdirs();
-
                     File tempFile = new File(targetFile.getAbsolutePath() + ".tmp");
-
                     broadcastStatus("Receiving: " + targetFile.getName());
                     updateNotification("Receiving: " + targetFile.getName());
-
                     try (FileOutputStream fos = new FileOutputStream(tempFile)) {
                         byte[] buffer = new byte[65536];
                         long remaining = fileSize;
@@ -369,12 +371,9 @@ public class SyncService extends Service {
                             remaining -= read;
                         }
                     }
-
                     if (targetFile.exists()) targetFile.delete();
                     tempFile.renameTo(targetFile);
-
                     scanFileWithMediaScanner(targetFile);
-
                     dos.writeByte(0x00);
                     dos.flush();
 
@@ -383,38 +382,29 @@ public class SyncService extends Service {
                     byte[] tokenBytes = new byte[tokenLen];
                     dis.readFully(tokenBytes);
                     String presentedToken = new String(tokenBytes, "UTF-8");
-
                     int fIdLen = dis.readUnsignedShort();
                     byte[] fIdBytes = new byte[fIdLen];
                     dis.readFully(fIdBytes);
                     String folderId = new String(fIdBytes, "UTF-8");
-
-                    boolean authPassed = isDeletionAllowed && !activeDeletionPin.isEmpty() && activeDeletionPin.equals(presentedToken);
-
+                    boolean authPassed = verifyDeletionPin(presentedToken);
                     int relLen = dis.readUnsignedShort();
                     byte[] relBytes = new byte[relLen];
                     dis.readFully(relBytes);
                     String rawRel = new String(relBytes, "UTF-8");
                     String relPath = sanitizeRemotePath(rawRel, getFolderNameById(folderId));
-
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    boolean isConfirmed = prefs.getBoolean(folderId + "_confirmed", false);
                     boolean isEnabled = prefs.getBoolean(folderId + "_sync_enabled", true);
                     String targetRoot = prefs.getString(folderId, null);
-                    if (targetRoot == null || targetRoot.isEmpty()) {
-                        targetRoot = getTargetDirectoryFallback(folderId);
-                    }
-
+                    if (targetRoot == null || targetRoot.isEmpty()) {targetRoot = getTargetDirectoryFallback(folderId);}
                     if (!authPassed) {
-                        broadcastStatus("Blocked unauthorized deletion attempt!");
                         dos.writeByte(0x02); // 0x02: Unauthorized
                         dos.flush();
                         continue;
                     }
-
-                    if (isEnabled && !relPath.isEmpty() && !relPath.equals(".") && !relPath.contains("..")) {
+                    if (isConfirmed && isEnabled && !relPath.isEmpty() && !relPath.equals(".") && !relPath.contains("..")) {
                         File root = new File(targetRoot).getCanonicalFile();
                         File target = new File(root, relPath).getCanonicalFile();
-
                         if (target.getPath().startsWith(root.getPath() + File.separator) && target.exists()) {
                             deleteRecursive(target);
                             rescanMediaStorePath(target.getAbsolutePath());
@@ -436,7 +426,6 @@ public class SyncService extends Service {
                     dev.put("manufacturer", Build.MANUFACTURER != null ? Build.MANUFACTURER : "Unknown");
                     dev.put("version", Build.VERSION.RELEASE != null ? Build.VERSION.RELEASE : "");
                     dev.put("sdk", Build.VERSION.SDK_INT);
-
                     JSONArray roots = new JSONArray();
                     File ext = Environment.getExternalStorageDirectory();
                     if (ext != null) {
@@ -445,7 +434,6 @@ public class SyncService extends Service {
                         r.put("path", ext.getAbsolutePath());
                         roots.put(r);
                     }
-
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                     File configFile = new File(getFilesDir(), "windows_sources.json");
                     if (configFile.exists()) {
@@ -466,7 +454,6 @@ public class SyncService extends Service {
                         } catch (Exception ignored) {}
                     }
                     dev.put("root_dirs", roots);
-
                     byte[] payload = dev.toString().getBytes("UTF-8");
                     dos.writeByte(0x00);
                     dos.writeInt(payload.length);
@@ -478,12 +465,10 @@ public class SyncService extends Service {
                     byte[] pathBytes = new byte[pathLen];
                     dis.readFully(pathBytes);
                     String targetPath = new String(pathBytes, "UTF-8");
-
                     File dir = new File(targetPath);
                     JSONObject res = new JSONObject();
                     res.put("path", targetPath);
                     res.put("exists", dir.exists());
-
                     JSONArray items = new JSONArray();
                     if (dir.exists() && dir.isDirectory()) {
                         File[] list = dir.listFiles();
@@ -493,7 +478,6 @@ public class SyncService extends Service {
                                 if (!f1.isDirectory() && f2.isDirectory()) return 1;
                                 return f1.getName().compareToIgnoreCase(f2.getName());
                             });
-
                             for (File f : list) {
                                 JSONObject item = new JSONObject();
                                 item.put("name", f.getName());
@@ -506,7 +490,6 @@ public class SyncService extends Service {
                         }
                     }
                     res.put("items", items);
-
                     byte[] payload = res.toString().getBytes("UTF-8");
                     dos.writeByte(0x00);
                     dos.writeInt(payload.length);
@@ -518,7 +501,6 @@ public class SyncService extends Service {
                     byte[] pathBytes = new byte[pathLen];
                     dis.readFully(pathBytes);
                     String targetPath = new String(pathBytes, "UTF-8");
-
                     File file = new File(targetPath);
                     if (!file.exists() || !file.isFile() || !file.canRead()) {
                         dos.writeByte(0x01);
@@ -528,7 +510,6 @@ public class SyncService extends Service {
                         long len = file.length();
                         dos.writeLong(len);
                         dos.flush();
-
                         byte[] buf = new byte[65536];
                         try (FileInputStream fis = new FileInputStream(file)) {
                             long remaining = len;
@@ -548,11 +529,9 @@ public class SyncService extends Service {
                     dis.readFully(pathBytes);
                     String targetPath = new String(pathBytes, "UTF-8");
                     long fileSize = dis.readLong();
-
                     File targetFile = new File(targetPath);
                     File parent = targetFile.getParentFile();
                     if (parent != null && !parent.exists()) parent.mkdirs();
-
                     File tempFile = new File(targetPath + ".upload_tmp");
                     try (FileOutputStream fos = new FileOutputStream(tempFile)) {
                         byte[] buffer = new byte[65536];
@@ -566,9 +545,7 @@ public class SyncService extends Service {
                     }
                     if (targetFile.exists()) targetFile.delete();
                     tempFile.renameTo(targetFile);
-
                     scanFileWithMediaScanner(targetFile);
-
                     dos.writeByte(0x00);
                     dos.flush();
 
@@ -577,21 +554,16 @@ public class SyncService extends Service {
                     byte[] tokenBytes = new byte[tokenLen];
                     dis.readFully(tokenBytes);
                     String presentedToken = new String(tokenBytes, "UTF-8");
-
                     int pathLen = dis.readUnsignedShort();
                     byte[] pathBytes = new byte[pathLen];
                     dis.readFully(pathBytes);
                     String targetPath = new String(pathBytes, "UTF-8");
-
-                    boolean authPassed = isDeletionAllowed && !activeDeletionPin.isEmpty() && activeDeletionPin.equals(presentedToken);
-
+                    boolean authPassed = verifyDeletionPin(presentedToken);
                     if (!authPassed) {
-                        broadcastStatus("Blocked unauthorized remote file wipe!");
                         dos.writeByte(0x02); // 0x02: Unauthorized
                         dos.flush();
                         continue;
                     }
-
                     if (isDeletionPathSafe(targetPath)) {
                         File target = new File(targetPath).getCanonicalFile();
                         if (target.exists()) {
@@ -607,11 +579,8 @@ public class SyncService extends Service {
                     byte[] pathBytes = new byte[pathLen];
                     dis.readFully(pathBytes);
                     String targetPath = new String(pathBytes, "UTF-8");
-
                     File target = new File(targetPath);
-                    if (!target.exists()) {
-                        target.mkdirs();
-                    }
+                    if (!target.exists()) {target.mkdirs();}
                     dos.writeByte(0x00);
                     dos.flush();
                 }
@@ -634,36 +603,29 @@ public class SyncService extends Service {
                 conn.setConnectTimeout(3000);
                 conn.setReadTimeout(4000);
                 conn.setRequestMethod("GET");
-
                 if (conn.getResponseCode() == 200) {
                     BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
                     StringBuilder sb = new StringBuilder();
                     String line;
                     while ((line = in.readLine()) != null) sb.append(line);
                     in.close();
-
                     String jsonConfig = sb.toString();
                     File configFile = new File(context.getFilesDir(), "windows_sources.json");
-                    try (FileOutputStream fos = new FileOutputStream(configFile)) {
-                        fos.write(jsonConfig.getBytes("UTF-8"));
-                    }
-
-                    if (activeListener != null) {
-                        activeListener.onConfigUpdated(jsonConfig);
-                    }
+                    try (FileOutputStream fos = new FileOutputStream(configFile)) {fos.write(jsonConfig.getBytes("UTF-8"));}
+                    if (activeListener != null) {activeListener.onConfigUpdated(jsonConfig);}
                     context.sendBroadcast(new Intent(ACTION_CONFIG_REFRESH).setPackage(context.getPackageName()));
                 }
             } catch (Exception ignored) {
-            } finally {
-                if (onComplete != null) onComplete.run();
-            }
+            } finally {if (onComplete != null) onComplete.run();}
         }).start();
     }
 
-    private void ensureConfigLoadedFromPc(String pcIp) {
+    private void ensureConfigLoadedFromPc(final String pcIp) {
         File configFile = new File(getFilesDir(), "windows_sources.json");
         if (!configFile.exists() || configFile.length() == 0) {
-            fetchConfigFromPc(this, pcIp, null);
+            fetchConfigFromPc(this, pcIp, () -> triggerManifestSyncFromAndroid(pcIp));
+        } else {
+            triggerManifestSyncFromAndroid(pcIp);
         }
     }
 
@@ -680,47 +642,29 @@ public class SyncService extends Service {
     }
 
     private boolean isDeletionPathSafe(String targetPath) {
-        if (targetPath == null || targetPath.trim().isEmpty()) {
-            return false;
-        }
-
+        if (targetPath == null || targetPath.trim().isEmpty()) {return false;}
         try {
             File file = new File(targetPath).getCanonicalFile();
             String canonical = file.getPath();
-
             // 1. Never allow root, internal storage base, or top-level SD card wipes
             File extStorage = Environment.getExternalStorageDirectory().getCanonicalFile();
-            if (canonical.equals(extStorage.getPath()) || canonical.equals("/") || canonical.equals("/storage/emulated")) {
-                return false;
-            }
-
+            if (canonical.equals(extStorage.getPath()) || canonical.equals("/") || canonical.equals("/storage/emulated")) {return false;}
             // 2. Blacklist system-critical directories
             String lower = canonical.toLowerCase(Locale.ROOT);
-            if (lower.startsWith(new File(extStorage, "Android").getCanonicalPath().toLowerCase(Locale.ROOT))) {
-                return false;
-            }
-
+            if (lower.startsWith(new File(extStorage, "Android").getCanonicalPath().toLowerCase(Locale.ROOT))) {return false;}
             // 3. Ensure the target path resides strictly within an authorized sync directory
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
             File configFile = new File(getFilesDir(), "windows_sources.json");
-            
-            if (!configFile.exists()) {
-                return false;
-            }
-
+            if (!configFile.exists()) {return false;}
             byte[] b = new byte[(int) configFile.length()];
-            try (FileInputStream fis = new FileInputStream(configFile)) {
-                fis.read(b);
-            }
+            try (FileInputStream fis = new FileInputStream(configFile)) {fis.read(b);}
             JSONArray arr = new JSONArray(new String(b, "UTF-8"));
-
             boolean insideAllowedBoundary = false;
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject obj = arr.getJSONObject(i);
                 String folderId = obj.optString("id");
                 String defaultDir = "/storage/emulated/0/" + obj.optString("name");
                 String mappedTarget = prefs.getString(folderId, defaultDir);
-
                 File allowedRoot = new File(mappedTarget).getCanonicalFile();
                 // Allow deletion only if the target is a SUB-PATH of the root, not the root directory itself
                 if (canonical.startsWith(allowedRoot.getPath() + File.separator)) {
@@ -728,29 +672,21 @@ public class SyncService extends Service {
                     break;
                 }
             }
-
             return insideAllowedBoundary;
-
-        } catch (Exception e) {
-            return false;
-        }
+        } catch (Exception e) {return false;}
     }
 
 //NOTE if you wish to make deletion outside of synced folder as well, implment following function note that it maybe unsafe!
-
     // private boolean isDeletionPathSafe(String targetPath) {
     //     if (targetPath == null || targetPath.trim().isEmpty()) {
     //         return false;
     //     }
-
     //     try {
     //         File file = new File(targetPath).getCanonicalFile();
     //         String canonical = file.getPath();
-
     //         // 1. Never allow root, internal storage base, or top-level volume wipes
     //         File extStorage = Environment.getExternalStorageDirectory().getCanonicalFile();
     //         String extPath = extStorage.getPath();
-
     //         if (canonical.equals("/") || 
     //             canonical.equals("/storage") || 
     //             canonical.equals("/storage/emulated") || 
@@ -758,36 +694,27 @@ public class SyncService extends Service {
     //             canonical.equals("/sdcard")) {
     //             return false;
     //         }
-
     //         // 2. Blacklist OS and system-critical app container hierarchies
     //         String lower = canonical.toLowerCase(Locale.ROOT);
     //         String androidSystemDir = new File(extStorage, "Android").getCanonicalPath().toLowerCase(Locale.ROOT);
-
     //         if (lower.equals(androidSystemDir) || lower.startsWith(androidSystemDir + File.separator)) {
     //             return false;
     //         }
-
     //         if (lower.startsWith("/system") || lower.startsWith("/data") || lower.startsWith("/proc") || lower.startsWith("/sys")) {
     //             return false;
     //         }
-
     //         // Path is outside critical system roots; allow deletion
     //         return true;
-
     //     } catch (Exception e) {
     //         return false;
     //     }
     // }
-
-
     private String getDeviceIpAddress() {
         try {
             for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 if (nif.isLoopback() || !nif.isUp()) continue;
                 for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
-                    if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
-                        return addr.getHostAddress();
-                    }
+                    if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {return addr.getHostAddress();}
                 }
             }
         } catch (Exception ignored) {}
@@ -813,9 +740,7 @@ public class SyncService extends Service {
             JSONArray arr = new JSONArray(new String(data, "UTF-8"));
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject obj = arr.getJSONObject(i);
-                if (folderId.equals(obj.optString("id"))) {
-                    return "/storage/emulated/0/" + obj.optString("name", "SyncWorkspace");
-                }
+                if (folderId.equals(obj.optString("id"))) {return "/storage/emulated/0/" + obj.optString("name", "SyncWorkspace");}
             }
         } catch (Exception ignored) {}
         return "/storage/emulated/0/SyncWorkspace";
@@ -830,9 +755,7 @@ public class SyncService extends Service {
             JSONArray arr = new JSONArray(new String(data, "UTF-8"));
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject obj = arr.getJSONObject(i);
-                if (folderId.equals(obj.optString("id"))) {
-                    return obj.optString("name", "");
-                }
+                if (folderId.equals(obj.optString("id"))) {return obj.optString("name", "");}
             }
         } catch (Exception ignored) {}
         return "";
@@ -842,9 +765,7 @@ public class SyncService extends Service {
         if (path == null) return "";
         // Unify backslashes, convert repeated slashes, and strip leading/trailing slashes
         String p = path.replace('\\', '/').trim();
-        if (p.length() >= 2 && p.charAt(1) == ':') {
-            p = p.substring(2);
-        }
+        if (p.length() >= 2 && p.charAt(1) == ':') {p = p.substring(2);}
         p = p.replaceAll("/+", "/");
         while (p.startsWith("./")) p = p.substring(2);
         while (p.startsWith("/")) p = p.substring(1);
@@ -866,9 +787,7 @@ public class SyncService extends Service {
         } catch (Exception e) {
             String rootAbs = normalizePath(root.getAbsolutePath());
             String fileAbs = normalizePath(file.getAbsolutePath());
-            if (fileAbs.startsWith(rootAbs)) {
-                return normalizePath(fileAbs.substring(rootAbs.length()));
-            }
+            if (fileAbs.startsWith(rootAbs)) {return normalizePath(fileAbs.substring(rootAbs.length()));}
             return file.getName();
         }
     }
@@ -876,25 +795,35 @@ public class SyncService extends Service {
     private JSONObject evaluateManifest(String folderId, JSONObject winManifest) {
         JSONObject report = new JSONObject();
         JSONArray neededArr = new JSONArray();
-
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        boolean isConfirmed = prefs.getBoolean(folderId + "_confirmed", false);
         boolean isEnabled = prefs.getBoolean(folderId + "_sync_enabled", true);
         boolean mirrorExact = prefs.getBoolean(folderId + "_mirror_exact", false);
         String folderName = getFolderNameById(folderId);
-
         String rawPrettyManifest;
         try {
             rawPrettyManifest = winManifest.toString(2);
-        } catch (Exception e) {
-            rawPrettyManifest = winManifest.toString();
+        } catch (Exception e) {rawPrettyManifest = winManifest.toString();}
+        if (!isConfirmed) {
+            try {
+                report.put("needed", neededArr);
+                report.put("local_count", 0);
+                report.put("remote_count", winManifest.length());
+                report.put("deleted_count", 0);
+                report.put("status_note", "Pending Destination Setup");
+                Intent auditIntent = new Intent(ACTION_MANIFEST_VERIFIED);
+                auditIntent.putExtra("folder_id", folderId);
+                auditIntent.putExtra("raw_manifest", rawPrettyManifest);
+                auditIntent.putExtra("status_note", "Pending Destination Setup");
+                auditIntent.setPackage(getPackageName());
+                sendBroadcast(auditIntent);
+            } catch (Exception ignored) {}
+            return report;
         }
-
         String targetRoot = prefs.getString(folderId, null);
         if (targetRoot == null || targetRoot.trim().isEmpty()) {
             targetRoot = getTargetDirectoryFallback(folderId);
-            prefs.edit().putString(folderId, targetRoot).apply();
         }
-
         try {
             if (!isEnabled) {
                 report.put("needed", neededArr);
@@ -902,7 +831,6 @@ public class SyncService extends Service {
                 report.put("remote_count", winManifest.length());
                 report.put("deleted_count", 0);
                 report.put("status_note", "Sync Ignored (Disabled)");
-
                 Intent auditIntent = new Intent(ACTION_MANIFEST_VERIFIED);
                 auditIntent.putExtra("folder_id", folderId);
                 auditIntent.putExtra("raw_manifest", rawPrettyManifest);
@@ -911,21 +839,14 @@ public class SyncService extends Service {
                 sendBroadcast(auditIntent);
                 return report;
             }
-
             File targetDir = new File(targetRoot);
-            if (!targetDir.exists()) {
-                targetDir.mkdirs();
-            }
-
+            if (!targetDir.exists()) {targetDir.mkdirs();}
             // Keep consistent reference base to prevent symlink drift (/storage vs /data/media)
             File baseTargetDir = targetDir.getAbsoluteFile();
-
             Map<String, Long> localManifest = new HashMap<>();
             scanDirectoryRecursively(baseTargetDir, baseTargetDir, localManifest);
-
             Map<String, String> winCaseMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
             Map<String, Long> winSizeMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            
             Iterator<String> winKeys = winManifest.keys();
             while (winKeys.hasNext()) {
                 String rawKey = winKeys.next();
@@ -935,7 +856,6 @@ public class SyncService extends Service {
                     winSizeMap.put(normKey, winManifest.getLong(rawKey));
                 }
             }
-
             // android.util.Log.e("MIRROR_DEBUG", "=================== EVALUATE MANIFEST AUDIT ===================");
             // android.util.Log.e("MIRROR_DEBUG", "Folder ID: " + folderId + " | TargetRoot: " + targetRoot);
             // android.util.Log.e("MIRROR_DEBUG", "mirrorExact setting: " + mirrorExact);
@@ -947,9 +867,7 @@ public class SyncService extends Service {
             // for (String lk : localManifest.keySet()) {
             //     android.util.Log.e("MIRROR_DEBUG", "   LOC KEY: [" + lk + "]");
             // }
-
             int deletedCount = 0;
-
             if (mirrorExact && !winCaseMap.isEmpty() && winManifest.length() > 0) {
                 List<String> localKeys = new ArrayList<>(localManifest.keySet());
                 for (String localRelPath : localKeys) {
@@ -958,14 +876,11 @@ public class SyncService extends Service {
                         //android.util.Log.e("MIRROR_DEBUG", "SKIP EMPTY OR ROOT: [" + localRelPath + "]");
                         continue;
                     }
-
                     boolean foundInWindows = winCaseMap.containsKey(normLocal);
                     //android.util.Log.e("MIRROR_DEBUG", "CHECKING: Loc: [" + normLocal + "] -> Found on PC? " + foundInWindows);
-
                     if (!foundInWindows) {
                         File staleFile = new File(baseTargetDir, normLocal);
-                        android.util.Log.e("MIRROR_DEBUG", ">>> TRIGGERING DELETE: " + staleFile.getAbsolutePath() 
-                                + " | Exists: " + staleFile.exists() + " | IsFile: " + staleFile.isFile());
+                        android.util.Log.e("MIRROR_DEBUG", ">>> TRIGGERING DELETE: " + staleFile.getAbsolutePath() + " | Exists: " + staleFile.exists() + " | IsFile: " + staleFile.isFile());
                         if (staleFile.exists() && staleFile.isFile()) {
                             boolean deleted = staleFile.delete();
                             android.util.Log.e("MIRROR_DEBUG", ">>> DELETION RESULT: " + deleted + " for " + staleFile.getAbsolutePath());
@@ -978,26 +893,18 @@ public class SyncService extends Service {
                         //android.util.Log.e("MIRROR_DEBUG", "KEEPING: [" + normLocal + "] matches Windows manifest key [" + winCaseMap.get(normLocal) + "]");
                     }
                 }
-
                 if (deletedCount > 0) {
                     pruneEmptyDirectories(baseTargetDir);
-                    MediaScannerConnection.scanFile(
-                        this,
-                        new String[]{ baseTargetDir.getAbsolutePath() },
-                        null,
-                        null
-                    );
+                    MediaScannerConnection.scanFile(this, new String[]{ baseTargetDir.getAbsolutePath() }, null, null);
                 }
             } else {
                 //android.util.Log.e("MIRROR_DEBUG", "PRUNING BYPASSED: mirrorExact=" + mirrorExact + ", winCaseMapSize=" + winCaseMap.size());
             }
             //android.util.Log.e("MIRROR_DEBUG", "==============================================================");
-
             for (Map.Entry<String, String> entry : winCaseMap.entrySet()) {
                 String normWinKey = entry.getKey();
                 String rawWinKey = entry.getValue();
                 long expectedSize = winSizeMap.get(normWinKey);
-
                 Long existingSize = null;
                 for (Map.Entry<String, Long> localEntry : localManifest.entrySet()) {
                     if (localEntry.getKey().equalsIgnoreCase(normWinKey)) {
@@ -1005,17 +912,12 @@ public class SyncService extends Service {
                         break;
                     }
                 }
-
-                if (existingSize == null || existingSize != expectedSize) {
-                    neededArr.put(rawWinKey);
-                }
+                if (existingSize == null || existingSize != expectedSize) {neededArr.put(rawWinKey);}
             }
-
             report.put("needed", neededArr);
             report.put("local_count", localManifest.size());
             report.put("remote_count", winManifest.length());
             report.put("deleted_count", deletedCount);
-
             Intent auditIntent = new Intent(ACTION_MANIFEST_VERIFIED);
             auditIntent.putExtra("folder_id", folderId);
             auditIntent.putExtra("raw_manifest", rawPrettyManifest);
@@ -1040,15 +942,11 @@ public class SyncService extends Service {
         File[] children = dir.listFiles();
         if (children != null) {
             for (File child : children) {
-                if (child.isDirectory()) {
-                    pruneEmptyDirectories(child);
-                }
+                if (child.isDirectory()) {pruneEmptyDirectories(child);}
             }
         }
         File[] remaining = dir.listFiles();
-        if (remaining != null && remaining.length == 0) {
-            dir.delete();
-        }
+        if (remaining != null && remaining.length == 0) {dir.delete();}
     }
 
     private void scanDirectoryRecursively(File root, File current, Map<String, Long> outMap) {
@@ -1060,9 +958,7 @@ public class SyncService extends Service {
                 scanDirectoryRecursively(root, f, outMap);
             } else {
                 String rel = getRelativePath(root, f);
-                if (!rel.isEmpty()) {
-                    outMap.put(rel, f.length());
-                }
+                if (!rel.isEmpty()) {outMap.put(rel, f.length());}
             }
         }
     }   
@@ -1070,9 +966,7 @@ public class SyncService extends Service {
         if (fileOrDirectory.isDirectory()) {
             File[] children = fileOrDirectory.listFiles();
             if (children != null) {
-                for (File child : children) {
-                    deleteRecursive(child);
-                }
+                for (File child : children) {deleteRecursive(child);}
             }
         }
         fileOrDirectory.delete();
@@ -1083,12 +977,7 @@ public class SyncService extends Service {
     }
 
     private void rescanMediaStorePath(final String absolutePath) {
-        MediaScannerConnection.scanFile(
-            this,
-            new String[]{ absolutePath },
-            null,
-            null
-        );
+        MediaScannerConnection.scanFile(this, new String[]{ absolutePath }, null, null);
     }
 
     private void broadcastStatus(String msg) {
@@ -1100,33 +989,19 @@ public class SyncService extends Service {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID,
-                    "Mirror Sync TCP Engine",
-                    NotificationManager.IMPORTANCE_LOW
-            );
+            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Mirror Sync TCP Engine", NotificationManager.IMPORTANCE_LOW);
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) manager.createNotificationChannel(channel);
         }
     }
 
     private Notification buildNotification(String content) {
-        Notification.Builder builder = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
-
-        return builder
-                .setContentTitle("Mirror Sync Active")
-                .setContentText(content)
-                .setSmallIcon(R.drawable.ic_launcher)
-                .setOngoing(true)
-                .build();
+        Notification.Builder builder = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
+        return builder.setContentTitle("Mirror Sync Active").setContentText(content).setSmallIcon(R.drawable.ic_launcher).setOngoing(true).build();
     }
 
     private void updateNotification(String text) {
-        if (notificationManager != null) {
-            notificationManager.notify(NOTIF_ID, buildNotification(text));
-        }
+        if (notificationManager != null) {notificationManager.notify(NOTIF_ID, buildNotification(text));}
     }
 
     @Override
@@ -1137,14 +1012,10 @@ public class SyncService extends Service {
         if (serverSocket != null) {
             try { serverSocket.close(); } catch (Exception ignored) {}
         }
-        if (multicastLock != null && multicastLock.isHeld()) {
-            multicastLock.release();
-        }
+        if (multicastLock != null && multicastLock.isHeld()) {multicastLock.release();}
         super.onDestroy();
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
+    public IBinder onBind(Intent intent) {return null;}
 }

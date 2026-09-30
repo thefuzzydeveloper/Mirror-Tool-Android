@@ -2,3 +2,5 @@ android_mirror/build/app-aligned.apk
 /android_mirror/build
 /c\#/bin
 /c\#/obj
+/dotnet/bin
+/dotnet/obj

@@ -1,3 +1,4 @@
+<!-- README.md -->
 # Mirror Tool (Wi-Fi Auto Stream Sync)
 
 High-performance, bidirectional Wi-Fi file synchronization and wireless device explorer between Windows 10/11 and Android.
@@ -8,7 +9,6 @@ High-performance, bidirectional Wi-Fi file synchronization and wireless device e
 
 * **Windows Host Application (.NET 8):** [Download Mirror.Tool.zip (v2.0)](https://github.com/thefuzzydeveloper/Mirror-Tool-Android/releases/download/v2.0/Mirror.Tool.zip)
 * **Android Receiver App:** [Download MirrorSync.apk (v2.0)](https://github.com/thefuzzydeveloper/Mirror-Tool-Android/releases/download/v2.0/MirrorSync.apk)
-
 
 ---
 
@@ -80,9 +80,6 @@ Right-click the Windows system tray icon and select **Browse Android Devices & S
 * **Android Platform:** Java / Native JNI C integration (`libnative-sync.so`), Android Foreground Service, MediaScanner synchronization.
 * **Payload Chunking:** 4 MB streaming buffer chunks with 16-bit binary headers for payload delivery.
 Remember - mirroring android folders to PC is not feasible due to battery restrictions (it is possible, however not feasible)
-
-
-
 
 ## Mirror Tool: High-Performance Wireless Sync & Storage Gateway
 
