@@ -475,6 +475,74 @@ public static class ConfigManager{
         return string.Join('/', topDirs.Concat([flattened]));
     }
 
+    public static bool IsIntermediateOrLockFile(string filePath){
+        try{
+            string fileName = Path.GetFileName(filePath);
+            if (string.IsNullOrEmpty(fileName)) return true;
+
+            // Microsoft Office owner lock files (e.g. ~$document.docx, ~$newdocument.docx)
+            if (fileName.StartsWith("~$", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // LibreOffice / OpenOffice lock files (e.g. .~lock.document.docx#)
+            if (fileName.StartsWith(".~lock.", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Text editor and auto-save lock files (.#document.docx, document.docx~)
+            if (fileName.StartsWith(".#") || fileName.EndsWith("~"))
+                return true;
+
+            // Office temporary and scratch working files (~WRL*.tmp, ~WRD*.tmp, ~*.tmp)
+            if (fileName.StartsWith("~") && (fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) || fileName.EndsWith(".temp", StringComparison.OrdinalIgnoreCase)))
+                return true;
+
+            // Common intermediate, swap, and incomplete transfer files
+            string ext = Path.GetExtension(fileName).ToLowerInvariant();
+            if (ext is ".tmp" or ".temp" or ".swp" or ".swo" or ".crdownload" or ".part" or ".partial" or ".upload_tmp")
+                return true;
+
+            // OS-generated metadata files
+            if (fileName.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) ||
+                fileName.Equals("thumbs.db", StringComparison.OrdinalIgnoreCase) ||
+                fileName.Equals(".DS_Store", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (File.Exists(filePath)){
+                var attrs = File.GetAttributes(filePath);
+                if ((attrs & FileAttributes.Temporary) != 0)
+                    return true;
+                if (fileName.StartsWith("~") && (attrs & FileAttributes.Hidden) != 0)
+                    return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    public static bool IsFileLocked(string filePath){
+        try{
+            if (!File.Exists(filePath)) return true;
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return false;
+        }
+        catch (IOException){
+            return true;
+        }
+        catch (UnauthorizedAccessException){
+            return true;
+        }
+        catch{
+            return false;
+        }
+    }
+
+    public static bool IsSyncableFile(string filePath, List<string> allowedExtensions, List<string>? ignoredExtensions = null, bool checkLock = true){
+        if (IsIntermediateOrLockFile(filePath)) return false;
+        if (!IsExtensionAllowed(filePath, allowedExtensions, ignoredExtensions)) return false;
+        if (checkLock && IsFileLocked(filePath)) return false;
+        return true;
+    }
+
     public static bool IsExtensionAllowed(string filePath, List<string> allowedExtensions, List<string>? ignoredExtensions = null){
         string ext = Path.GetExtension(filePath).ToLowerInvariant();
         if (ignoredExtensions != null && ignoredExtensions.Count > 0){
@@ -783,6 +851,7 @@ public sealed class DeviceClient : IAsyncDisposable{
         await CreateDirectoryDirectAsync(androidDestinationFolder, ct);
         foreach (var file in Directory.EnumerateFiles(localFolder)){
             if (ct.IsCancellationRequested) break;
+            if (ConfigManager.IsIntermediateOrLockFile(file)) continue;
             string fileName = Path.GetFileName(file);
             string destPath = $"{androidDestinationFolder.TrimEnd('/')}/{fileName}";
             statusCallback?.Invoke($"Uploading: {fileName}...");
@@ -1017,13 +1086,23 @@ public sealed class DeviceClient : IAsyncDisposable{
         finally { _networkLock.Release(); }
     }
 
-    private static async Task<FileStream?> OpenReadWithRetryAsync(string path, int maxRetries = 6, int delayMs = 150, CancellationToken ct = default){
+    private static async Task<FileStream?> OpenReadWithRetryAsync(string path, int maxRetries = 8, int delayMs = 250, CancellationToken ct = default){
         for (int i = 0; i < maxRetries; i++){
             try{
-                if (!File.Exists(path)) return null;
-                return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, useAsync: true);
+                if (!File.Exists(path) || ConfigManager.IsIntermediateOrLockFile(path)) return null;
+                var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, useAsync: true);
+                long initialLen = fs.Length;
+                await Task.Delay(40, ct);
+                long currentLen = new FileInfo(path).Length;
+                if (initialLen != currentLen){
+                    fs.Dispose();
+                    await Task.Delay(delayMs, ct);
+                    continue;
+                }
+                return fs;
             }
-            catch (IOException) when (i < maxRetries - 1) { await Task.Delay(delayMs, ct); }
+            catch (IOException) when (i < maxRetries - 1){await Task.Delay(delayMs, ct);}
+            catch (UnauthorizedAccessException) when (i < maxRetries - 1){await Task.Delay(delayMs, ct);}
         }
         return null;
     }
@@ -1347,9 +1426,11 @@ public sealed class SyncEngine : IAsyncDisposable{
         }
         var newCts = new CancellationTokenSource();
         _debounceMap[key] = newCts;
-        _ = Task.Run(async () =>{
-            try{
-                await Task.Delay(500, newCts.Token);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(1200, newCts.Token);
                 await ExecuteFolderSyncAcrossAllDevicesAsync(folder, _cts.Token);
             }
             catch (OperationCanceledException) { }
@@ -1375,33 +1456,42 @@ public sealed class SyncEngine : IAsyncDisposable{
             string folderId = ConfigManager.ComputeFolderId(folderPath);
             var winManifest = new Dictionary<string, long>();
             var targetToLocal = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories)){
-                if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
+            foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
+            {
+                if (!ConfigManager.IsSyncableFile(file, folder.Extensions, folder.IgnoredExtensions)) continue;
                 string rel = Path.GetRelativePath(folderPath, file).Replace('\\', '/').TrimStart('/');
                 string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
-                try{
+                try
+                {
                     winManifest[targetRel] = new FileInfo(file).Length;
                     targetToLocal[targetRel] = file;
                 }
                 catch { }
             }
-            foreach (var client in clients){
+
+            foreach (var client in clients)
+            {
                 if (ct.IsCancellationRequested) break;
                 if (!await client.EnsureConnectedAsync(ct)) continue;
+
                 _statusCallback($"Auditing manifest ({client.RemoteIp})...", true);
                 var report = await client.ExchangeManifestAsync(folderId, winManifest, ct);
                 if (report == null) continue;
-                if (report.Needed.Count > 0){
-                    foreach (var neededRel in report.Needed){
+
+                if (report.Needed.Count > 0)
+                {
+                    foreach (var neededRel in report.Needed)
+                    {
                         if (ct.IsCancellationRequested) break;
                         string cleanKey = neededRel.Replace('\\', '/').TrimStart('/');
-                        if (targetToLocal.TryGetValue(cleanKey, out var localPath) && File.Exists(localPath)){
+                        if (targetToLocal.TryGetValue(cleanKey, out var localPath) && File.Exists(localPath))
+                        {
+                            if (ConfigManager.IsIntermediateOrLockFile(localPath)) continue;
                             _statusCallback($"Syncing: {Path.GetFileName(localPath)}", true);
                             await client.StreamFileAsync(folderId, localPath, cleanKey, ct);
                         }
                     }
                 }
-                await client.NotifySyncCompleteAsync(ct);
             }
             _statusCallback("Active", false);
             UpdateTrayState();
@@ -1490,7 +1580,7 @@ public sealed class SyncEngine : IAsyncDisposable{
                         var winManifest = new Dictionary<string, long>();
                         var targetToLocal = new Dictionary<string, string>();
                         foreach (var file in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories)){
-                            if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
+                            if (!ConfigManager.IsSyncableFile(file, folder.Extensions, folder.IgnoredExtensions)) continue;
                             string rel = Path.GetRelativePath(folderPath, file).Replace('\\', '/').TrimStart('/');
                             string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
                             try{
@@ -1510,6 +1600,7 @@ public sealed class SyncEngine : IAsyncDisposable{
                                 localFile = match.Value;
                             }
                             if (localFile != null && File.Exists(localFile)){
+                                if (ConfigManager.IsIntermediateOrLockFile(localFile)) continue;
                                 _statusCallback($"Syncing: {Path.GetFileName(localFile)}", true);
                                 await client.StreamFileAsync(folderId, localFile, cleanKey, ct);
                             }
@@ -1627,8 +1718,9 @@ public sealed class SyncEngine : IAsyncDisposable{
             var manifest = new Dictionary<string, long>();
             if (Directory.Exists(full)){
                 try{
-                    foreach (var file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories)){
-                        if (!ConfigManager.IsExtensionAllowed(file, folder.Extensions, folder.IgnoredExtensions)) continue;
+                    foreach (var file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
+                    {
+                        if (!ConfigManager.IsSyncableFile(file, folder.Extensions, folder.IgnoredExtensions, checkLock: false)) continue;
                         string rel = Path.GetRelativePath(full, file).Replace('\\', '/').TrimStart('/');
                         string targetRel = ConfigManager.ComputeTargetRelPath(rel, folder.ScrubLevel).Replace('\\', '/').TrimStart('/');
                         manifest[targetRel] = new FileInfo(file).Length;

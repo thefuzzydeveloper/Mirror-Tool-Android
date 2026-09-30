@@ -313,6 +313,7 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
                         Iterator<String> wKeys = winManifest.keys();
                         while (wKeys.hasNext()) {
                             String rawK = wKeys.next();
+                            if (SyncService.isIntermediateOrLockFile(rawK)) continue;
                             String sanitizedK = SyncService.sanitizeRemotePath(rawK, folderName);
                             if (!sanitizedK.isEmpty()) {winSizeMap.put(sanitizedK, winManifest.getLong(rawK));}
                         }
@@ -379,7 +380,7 @@ public class MainActivity extends Activity implements SyncService.ConfigUpdateLi
         File[] files = cur.listFiles();
         if (files == null) return;
         for (File f : files) {
-            if (f.getName().endsWith(".tmp") || f.getName().endsWith(".upload_tmp")) continue;
+            if (SyncService.isIntermediateOrLockFile(f.getName())) continue;
             if (f.isDirectory()) {
                 scanDir(root, f, map);
             } else {

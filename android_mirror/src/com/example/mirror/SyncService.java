@@ -55,6 +55,32 @@ public class SyncService extends Service{
     private static volatile int failedPinAttempts = 0;
     private static volatile long pinLockoutUntilMs = 0;
     private static volatile long pinExpiresAtMs = 0;
+    private static volatile long lastTriggerSyncTimeMs = 0;
+    private static final long TRIGGER_COOLDOWN_MS = 15000L;
+    private final List<String> pendingScanPaths = Collections.synchronizedList(new ArrayList<>());
+
+    private void flushPendingMediaScans() {
+        if (pendingScanPaths.isEmpty()) return;
+        String[] paths;
+        synchronized (pendingScanPaths) {
+            paths = pendingScanPaths.toArray(new String[0]);
+            pendingScanPaths.clear();
+        }
+        if (paths.length > 0) {
+            MediaScannerConnection.scanFile(this, paths, null, null);
+        }
+    }
+
+    public static boolean isIntermediateOrLockFile(String name) {
+        if (name == null || name.isEmpty()) return true;
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (name.startsWith("~$") || name.startsWith(".~lock.") || name.startsWith(".#") || name.endsWith("~")) return true;
+        if (name.startsWith("~") && (lower.endsWith(".tmp") || lower.endsWith(".temp"))) return true;
+        if (lower.endsWith(".tmp") || lower.endsWith(".temp") || lower.endsWith(".swp") || lower.endsWith(".swo") ||
+            lower.endsWith(".crdownload") || lower.endsWith(".part") || lower.endsWith(".partial") || lower.endsWith(".upload_tmp")) return true;
+        if (lower.equals("desktop.ini") || lower.equals("thumbs.db") || lower.equals(".ds_store")) return true;
+        return false;
+    }
 
     public static synchronized void setDeletionPin(String pin, long validityDurationMs) {
         activeDeletionPin = pin != null ? pin : "";
@@ -217,12 +243,15 @@ public class SyncService extends Service{
                             if (pcIp.isEmpty()) pcIp = packet.getAddress().getHostAddress();
                             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                             String currentSaved = prefs.getString("last_pc_ip", "");
-                            if (!pcIp.equals(currentSaved)) {prefs.edit().putString("last_pc_ip", pcIp).apply();}
+                            boolean ipChanged = !pcIp.equals(currentSaved);
+                            if (ipChanged) {
+                                prefs.edit().putString("last_pc_ip", pcIp).apply();
+                            }
                             Intent intent = new Intent(ACTION_PC_DISCOVERED);
                             intent.putExtra("pc_ip", pcIp);
                             intent.setPackage(getPackageName());
                             sendBroadcast(intent);
-                            ensureConfigLoadedFromPc(pcIp);
+                            ensureConfigLoadedFromPc(pcIp, ipChanged);
                         }
                     } catch (Exception ignored) {}
                 }
@@ -277,16 +306,19 @@ public class SyncService extends Service{
                     m2 = dis.readByte();
                 } catch (EOFException e) {break;}
                 if (m1 != (byte) 0xAA || m2 != (byte) 0x55) break;
-                acquireTransferWakeLock(180000L);
                 int cmd = dis.readByte();
+                if (cmd == CMD_FILE_STREAM || cmd == CMD_PULL_FILE || cmd == CMD_PUSH_FILE_DIRECT) {
+                    acquireTransferWakeLock(180000L);
+                } else if (cmd == CMD_MANIFEST_EXCHANGE) {
+                    acquireTransferWakeLock(30000L);
+                }
                 if (cmd == CMD_WAKE_SYNC) {
                     // Demand condition 1: File changed on PC, immediate synchronization woken
                     broadcastStatus("Waking Up: Remote Changes Detected");
                     dos.writeByte(0x00);
                     dos.flush();
                     String pcIp = socket.getInetAddress().getHostAddress();
-                    ensureConfigLoadedFromPc(pcIp);
-                    triggerManifestSyncFromAndroid(pcIp);
+                    ensureConfigLoadedFromPc(pcIp, true);
 
                 } else if (cmd == CMD_PING) {
                     String pcIp = socket.getInetAddress().getHostAddress();
@@ -298,7 +330,6 @@ public class SyncService extends Service{
                     sendBroadcast(intent);
                     dos.writeByte(0x00);
                     dos.flush();
-                    ensureConfigLoadedFromPc(pcIp);
 
                 } else if (cmd == CMD_CONFIG) {
                     String pcIp = socket.getInetAddress().getHostAddress();
@@ -349,7 +380,7 @@ public class SyncService extends Service{
                     boolean isEnabled = prefs.getBoolean(folderId + "_sync_enabled", true);
                     String targetRoot = prefs.getString(folderId, null);
                     if (targetRoot == null || targetRoot.isEmpty()) {targetRoot = getTargetDirectoryFallback(folderId);}
-                    if (!isConfirmed || !isEnabled) {
+                    if (!isConfirmed || !isEnabled || isIntermediateOrLockFile(new File(relPath).getName())) {
                         skipStreamBytes(dis, fileSize);
                         dos.writeByte(0x00);
                         dos.flush();
@@ -373,7 +404,7 @@ public class SyncService extends Service{
                     }
                     if (targetFile.exists()) targetFile.delete();
                     tempFile.renameTo(targetFile);
-                    scanFileWithMediaScanner(targetFile);
+                    pendingScanPaths.add(targetFile.getAbsolutePath());
                     dos.writeByte(0x00);
                     dos.flush();
 
@@ -418,6 +449,7 @@ public class SyncService extends Service{
                     updateNotification("Sync Completed (Verified)");
                     dos.writeByte(0x00);
                     dos.flush();
+                    flushPendingMediaScans();
                     releaseTransferWakeLock();
 
                 } else if (cmd == CMD_GET_DEVICE_INFO) {
@@ -587,6 +619,7 @@ public class SyncService extends Service{
             }
         } catch (Exception ignored) {
         } finally {
+            flushPendingMediaScans();
             releaseTransferWakeLock();
             try {
                 socket.close();
@@ -620,19 +653,28 @@ public class SyncService extends Service{
         }).start();
     }
 
-    private void ensureConfigLoadedFromPc(final String pcIp) {
+    private void ensureConfigLoadedFromPc(final String pcIp, boolean forceSync) {
         File configFile = new File(getFilesDir(), "windows_sources.json");
         if (!configFile.exists() || configFile.length() == 0) {
-            fetchConfigFromPc(this, pcIp, () -> triggerManifestSyncFromAndroid(pcIp));
-        } else {
-            triggerManifestSyncFromAndroid(pcIp);
+            fetchConfigFromPc(this, pcIp, () -> triggerManifestSyncFromAndroid(pcIp, true));
+        } else if (forceSync) {
+            triggerManifestSyncFromAndroid(pcIp, false);
         }
     }
 
-    private void triggerManifestSyncFromAndroid(final String pcIp) {
+    private void triggerManifestSyncFromAndroid(final String pcIp, boolean force) {
+        if (pcIp == null || pcIp.trim().isEmpty()) return;
+        long now = System.currentTimeMillis();
+        if (!force && (now - lastTriggerSyncTimeMs < TRIGGER_COOLDOWN_MS)) {
+            return;
+        }
+        lastTriggerSyncTimeMs = now;
         new Thread(() -> {
             try {
-                URL url = new URL("http://" + pcIp + ":" + HTTP_MANIFEST_PORT + "/trigger_sync?ip=" + URLEncoder.encode(getDeviceIpAddress(), "UTF-8"));
+                String myIp = getDeviceIpAddress();
+                String urlStr = "http://" + pcIp + ":" + HTTP_MANIFEST_PORT + "/trigger_sync";
+                if (myIp != null && !myIp.isEmpty()) {urlStr += "?ip=" + URLEncoder.encode(myIp, "UTF-8");}
+                URL url = new URL(urlStr);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(3000);
                 conn.getResponseCode();
@@ -780,14 +822,16 @@ public class SyncService extends Service{
 
     public static String getRelativePath(File root, File file) {
         try {
+            String rootAbs = root.getAbsolutePath();
+            String fileAbs = file.getAbsolutePath();
+            if (fileAbs.startsWith(rootAbs)) {
+                return normalizePath(fileAbs.substring(rootAbs.length()));
+            }
             URI baseUri = root.toURI();
             URI fileUri = file.toURI();
             String rel = baseUri.relativize(fileUri).getPath();
             return normalizePath(rel);
         } catch (Exception e) {
-            String rootAbs = normalizePath(root.getAbsolutePath());
-            String fileAbs = normalizePath(file.getAbsolutePath());
-            if (fileAbs.startsWith(rootAbs)) {return normalizePath(fileAbs.substring(rootAbs.length()));}
             return file.getName();
         }
     }
@@ -953,7 +997,7 @@ public class SyncService extends Service{
         File[] files = current.listFiles();
         if (files == null) return;
         for (File f : files) {
-            if (f.getName().endsWith(".tmp") || f.getName().endsWith(".upload_tmp")) continue;
+            if (isIntermediateOrLockFile(f.getName())) continue;
             if (f.isDirectory()) {
                 scanDirectoryRecursively(root, f, outMap);
             } else {
