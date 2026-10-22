@@ -30,12 +30,72 @@ internal static class Program{
 
     private static Icon? _idleIcon;
     private static Icon? _syncingIcon;
+    private static readonly object LogLock = new();
+    private const int MaxLogLines = 20000;
+    private const int RetainLogLines = 10000;
+    private static int _logLineCount = -1;
 
     public static void Log(string message){
         try{
             string logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}";
             Debug.WriteLine(logLine);
-            File.AppendAllText(LogFilePath, logLine + Environment.NewLine);
+            lock (LogLock){
+                if (_logLineCount < 0){
+                    _logLineCount = File.Exists(LogFilePath) ? CountLogLines(LogFilePath) : 0;
+                }
+
+                if (_logLineCount >= MaxLogLines){
+                    PruneLogFile();
+                }
+
+                File.AppendAllText(LogFilePath, logLine + Environment.NewLine);
+                _logLineCount++;
+            }
+        }
+        catch { }
+    }
+
+    private static int CountLogLines(string path){
+        try{
+            var fi = new FileInfo(path);
+            if (!fi.Exists) return 0;
+            if (fi.Length > 10 * 1024 * 1024) return MaxLogLines;
+            int count = 0;
+            using var reader = new StreamReader(path);
+            while (reader.ReadLine() != null) count++;
+            return count;
+        }
+        catch { return 0; }
+    }
+
+    private static void PruneLogFile(){
+        try{
+            if (!File.Exists(LogFilePath)) return;
+            var fi = new FileInfo(LogFilePath);
+            if (!fi.Exists) return;
+
+            string[] retained;
+            if (fi.Length > 10 * 1024 * 1024){
+                const int readBytes = 2 * 1024 * 1024;
+                using var fs = new FileStream(LogFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                fs.Seek(-readBytes, SeekOrigin.End);
+                using var reader = new StreamReader(fs, Encoding.UTF8);
+                reader.ReadLine();
+                var tail = reader.ReadToEnd();
+                var rawLines = tail.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+                retained = rawLines.Length > RetainLogLines ? rawLines[^RetainLogLines..] : rawLines;
+            }
+            else{
+                var lines = File.ReadAllLines(LogFilePath);
+                if (lines.Length < MaxLogLines){
+                    _logLineCount = lines.Length;
+                    return;
+                }
+                retained = lines.Length > RetainLogLines ? lines[^RetainLogLines..] : lines;
+            }
+
+            File.WriteAllLines(LogFilePath, retained);
+            _logLineCount = retained.Length;
         }
         catch { }
     }
@@ -143,9 +203,10 @@ internal static class Program{
                 }
             });
             _engine.OnDiscoveryStateChanged += enabled =>{
-                if (_trayIcon?.ContextMenuStrip?.InvokeRequired == true){
-                    _trayIcon.ContextMenuStrip.Invoke((Action)(() =>{
-                        foreach (ToolStripItem item in _trayIcon.ContextMenuStrip.Items){
+                var menu = _trayIcon?.ContextMenuStrip;
+                if (menu?.InvokeRequired == true){
+                    menu.Invoke((Action)(() =>{
+                        foreach (ToolStripItem item in menu.Items){
                             if (item is ToolStripMenuItem mi && mi.Text.StartsWith("📡"))
                                 mi.Checked = enabled;
                         }
@@ -1242,8 +1303,13 @@ public sealed class HttpManifestServer : IAsyncDisposable{
                 _ = ProcessRequestAsync(context);
             }
             catch when (ct.IsCancellationRequested) { break; }
+            catch (HttpListenerException) when (!_listener.IsListening) { break; }
             catch (Exception ex){
                 Program.Log(string.Format("HttpManifestServer RunAsync EXCEPTION: {0}", ex.Message));
+                try{
+                    await Task.Delay(1000, ct);
+                }
+                catch (OperationCanceledException) { break; }
             }
         }
     }
@@ -1594,6 +1660,11 @@ public sealed class SyncEngine : IAsyncDisposable{
         try{
             using var udp = new UdpClient();
             udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            try{
+                const int SIO_UDP_CONNRESET = -1744830452;
+                udp.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
+            }
+            catch { }
             udp.Client.Bind(new IPEndPoint(IPAddress.Any, Protocol.UdpBeaconPort));
             var lastAnnounce = DateTime.MinValue;
             while (!ct.IsCancellationRequested){
@@ -1609,27 +1680,30 @@ public sealed class SyncEngine : IAsyncDisposable{
                     }
                 }
                 try{
-                    var receiveTask = udp.ReceiveAsync(ct).AsTask();
-                    var completedTask = await Task.WhenAny(receiveTask, Task.Delay(1000, ct));
-                    if (completedTask == receiveTask){
-                        var res = await receiveTask;
-                        string text = Encoding.UTF8.GetString(res.Buffer).Trim();
-                        if (text.StartsWith("MIRROR_PHONE_ANNOUNCE:")){
-                            string phoneIp = text.Split(':', 2)[1].Trim();
-                            if (string.IsNullOrEmpty(phoneIp)) phoneIp = res.RemoteEndPoint.Address.ToString();
-                            _ = ConnectSingleDeviceAsync(phoneIp, ct);
-                        }
-                        else if (text == "MIRROR_QUERY_PC"){
-                            foreach (var ip in NetworkDiscovery.GetActiveIPv4Subnets()){
-                                byte[] reply = Encoding.UTF8.GetBytes($"MIRROR_PC_ANNOUNCE:{ip}");
-                                await udp.SendAsync(reply, reply.Length, res.RemoteEndPoint);
-                            }
+                    using var timeoutCts = new CancellationTokenSource(1000);
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                    var res = await udp.ReceiveAsync(linkedCts.Token);
+                    string text = Encoding.UTF8.GetString(res.Buffer).Trim();
+                    if (text.StartsWith("MIRROR_PHONE_ANNOUNCE:")){
+                        string phoneIp = text.Split(':', 2)[1].Trim();
+                        if (string.IsNullOrEmpty(phoneIp)) phoneIp = res.RemoteEndPoint.Address.ToString();
+                        _ = ConnectSingleDeviceAsync(phoneIp, ct);
+                    }
+                    else if (text == "MIRROR_QUERY_PC"){
+                        foreach (var ip in NetworkDiscovery.GetActiveIPv4Subnets()){
+                            byte[] reply = Encoding.UTF8.GetBytes($"MIRROR_PC_ANNOUNCE:{ip}");
+                            await udp.SendAsync(reply, reply.Length, res.RemoteEndPoint);
                         }
                     }
                 }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex){
                     Program.Log(string.Format("RunUdpBeaconAsync inner EXCEPTION: {0}", ex.Message));
+                    try{
+                        await Task.Delay(1000, ct);
+                    }
+                    catch (OperationCanceledException) { break; }
                 }
             }
         }
